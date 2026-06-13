@@ -1,0 +1,132 @@
+
+{
+  "core": {
+    "files": [
+      "init.md",
+      "agent.md",
+      "config.md",
+      "router.md",
+      "memory_policy.md"
+    ]
+  },
+
+  "memory": {
+    "files": [
+      "global.md",
+      "user_profile.md",
+      "preferences.md",
+      "context_index.json"
+    ],
+    "folders": {
+      "projects": {
+        "files": [
+          "project_index.md"
+        ]
+      }
+    }
+  },
+
+  "projects": {
+    "folders": {
+      "template_project": {
+        "files": [
+          "project.md",
+          "state.md",
+          "memory.md",
+          "context_index.json"
+        ],
+        "folders": {
+          "tasks": {
+            "files": [
+              "backlog.md",
+              "active.md",
+              "done.md"
+            ]
+          },
+
+          "execution": {
+            "files": [
+              "run_log.md",
+              "decisions.md",
+              "errors.md"
+            ]
+          },
+
+          "agents": {
+            "files": [
+              "assigned_agents.md",
+              "agent_context.md"
+            ]
+          },
+
+          "tools": {
+            "files": [
+              "tool_usage.md",
+              "tool_state.json"
+            ]
+          },
+
+          "artifacts": {
+            "files": [
+              "outputs.md",
+              "code_snippets.md",
+              "assets_index.md"
+            ]
+          },
+
+          "sop": {
+            "files": [
+              "workflow.md",
+              "rules.md",
+              "conventions.md",
+              "README.md"
+            ]
+          }
+        }
+      }
+    }
+  },
+
+  "agents": {
+    "files": [
+      "registry.md",
+      "base_agent.md",
+      "research_agent.md",
+      "coding_agent.md",
+      "planning_agent.md"
+    ]
+  },
+
+  "skills": {
+    "files": [
+      "registry.md",
+      "git_skill.md",
+      "coding_skill.md",
+      "web_research_skill.md",
+      "memory_skill.md"
+    ]
+  },
+
+  "tools": {
+    "files": [
+      "tool_registry.md",
+      "filesystem_tool.md",
+      "web_tool.md",
+      "executor_tool.md"
+    ]
+  },
+
+  "logs": {
+    "files": [
+      "debug.md",
+      "current_month.md"
+    ]
+  },
+
+  "playground": {
+    "folders": {
+      "test-landing": {},
+      "prueba-app": {}
+    }
+  }
+}

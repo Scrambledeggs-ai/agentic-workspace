@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+logs/
+projects/*/
+!projects/template_project/
+.DS_Store
