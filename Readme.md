@@ -61,7 +61,15 @@ Ejecutar el script principal:
 ```bash
 python3 generate.py
 ```
+## Crear nuevo proyecto
 
+Este comando crea un nuevo proyecto dentro de `projects/` replicando la plantilla `template_project`.
+
+```bash
+python3 generate.py new <nombre_del_proyecto>
+---
+
+> Nota: El comando debe ejecutarse desde la carpeta raíz del proyecto donde se encuentra `generate.py`.
 ---
 
 ## Descripción
