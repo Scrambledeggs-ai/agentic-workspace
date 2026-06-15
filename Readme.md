@@ -1,6 +1,6 @@
 # Agentic Workspace
 
-Proyecto de scripts en Python para automatización y pruebas locales.
+Proyecto de scripts en Python para creacion de entorno de carpetas para trabajar con agentes IA
 
 ---
 
