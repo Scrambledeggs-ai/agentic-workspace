@@ -87,6 +87,12 @@ Este proyecto contiene un menú en Python para generar y manejar la estructura d
 
 ---
 
+## Documentación
+
+Manual de uso: [Agentic Workspace — manual](https://claude.ai/code/artifact/74ecf23d-4272-42a7-94ae-eeecfc6f13ca)
+
+---
+
 ## Flujo básico de Git
 
 Guardar cambios:
