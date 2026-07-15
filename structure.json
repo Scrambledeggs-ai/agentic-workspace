@@ -89,7 +89,6 @@
 
   "agents": {
     "files": [
-      "registry.md",
       "base_agent.md",
       "research_agent.md",
       "coding_agent.md",
@@ -99,7 +98,6 @@
 
   "skills": {
     "files": [
-      "registry.md",
       "git_skill.md",
       "coding_skill.md",
       "web_research_skill.md",
@@ -109,7 +107,6 @@
 
   "tools": {
     "files": [
-      "tool_registry.md",
       "filesystem_tool.md",
       "web_tool.md",
       "executor_tool.md"
