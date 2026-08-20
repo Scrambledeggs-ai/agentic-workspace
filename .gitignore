@@ -4,3 +4,5 @@ logs/
 projects/*/
 !projects/template_project/
 .DS_Store
+NEXT_STEPS.md
+CLAUDE.md
