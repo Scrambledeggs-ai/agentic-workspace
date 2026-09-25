@@ -1,0 +1,846 @@
+"""Pruebas de aw. Solo biblioteca estándar: python3 -m unittest discover -s tests -v
+
+Cada prueba trabaja en un workspace temporal (AW_HOME) y en un TMPDIR propio,
+así que nunca toca el workspace real ni los archivos de sesión reales.
+"""
+import importlib.util
+import json
+import os
+import py_compile
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(REPO, "generate.py")
+HOOK_EVENTS = ["SessionStart", "PostToolUse", "PostToolUseFailure", "PreCompact", "Stop", "SessionEnd"]
+
+
+def slurp(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def load_aw(workspace):
+    """Importa generate.py como módulo con AW_HOME apuntando al workspace de prueba."""
+    previous = os.environ.get("AW_HOME")
+    os.environ["AW_HOME"] = workspace
+    try:
+        spec = importlib.util.spec_from_file_location(f"aw_under_test_{abs(hash(workspace))}", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if previous is None:
+            os.environ.pop("AW_HOME", None)
+        else:
+            os.environ["AW_HOME"] = previous
+
+
+class AwCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="aw-test-")
+        self.ws = os.path.join(self.tmp, "ws")
+        self.sessions = os.path.join(self.tmp, "tmp")
+        os.makedirs(self.sessions)
+        self.env = dict(os.environ, AW_HOME=self.ws, TMPDIR=self.sessions)
+        self.env.pop("CLAUDE_PROJECT_DIR", None)
+        self.env.pop("AW_PROJECT", None)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # -- utilidades --
+    def aw(self, *args, cwd=None, stdin=None):
+        return subprocess.run([sys.executable, SCRIPT, *args], cwd=cwd or self.tmp, env=self.env,
+                              input=stdin, capture_output=True, text=True)
+
+    def init(self):
+        result = self.aw("init")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def new_project(self, name="demo", desc="Proyecto de prueba"):
+        self.init()
+        result = self.aw("project", "new", name, "--desc", desc)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.project(name)
+
+    def project(self, name="demo"):
+        return os.path.join(self.ws, "projects", name)
+
+    def read(self, project, *parts):
+        with open(os.path.join(project, *parts), encoding="utf-8") as f:
+            return f.read()
+
+    def write(self, path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def hook(self, event, payload, cwd):
+        return self.aw("hook", event, cwd=cwd, stdin=json.dumps(payload))
+
+    def git(self, cwd, *args):
+        result = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                                cwd=cwd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def template_files(self):
+        base = os.path.join(self.ws, "projects", "template_project")
+        found = []
+        for dirpath, _dirs, files in os.walk(base):
+            for fname in files:
+                found.append(os.path.join(dirpath, fname))
+        return found
+
+
+class TestSintaxis(unittest.TestCase):
+    def test_compila(self):
+        py_compile.compile(SCRIPT, doraise=True)
+
+    def test_structure_json_valido(self):
+        with open(os.path.join(REPO, "structure.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        template = data["projects"]["folders"]["template_project"]
+        self.assertIn("skills", template["folders"])
+        self.assertIn("assigned_tools.md", template["folders"]["tools"]["files"])
+        self.assertEqual(sorted(template["folders"]), sorted([".claude", "tasks", "execution", "agents", "skills", "tools", "artifacts", "sop"]))
+
+
+class TestEstructura(AwCase):
+    def test_init_crea_plantilla_con_contenido(self):
+        self.init()
+        files = self.template_files()
+        self.assertGreaterEqual(len(files), 26)
+        for path in files:
+            self.assertGreater(os.path.getsize(path), 0, f"vacío: {path}")
+
+    def test_json_de_la_plantilla_son_validos(self):
+        self.init()
+        base = os.path.join(self.ws, "projects", "template_project")
+        for rel in (".claude/settings.json", "context_index.json", "tools/tool_state.json"):
+            with open(os.path.join(base, rel), encoding="utf-8") as f:
+                json.load(f)
+
+    def test_claude_md_de_workspace(self):
+        self.init()
+        text = slurp(os.path.join(self.ws, "CLAUDE.md"))
+        self.assertIn("Aplica solo a proyectos aw", text.splitlines()[2])
+        self.assertNotIn("@@", text)
+        self.assertIn(os.path.join(self.ws, "agents"), text)
+
+    def test_init_no_pisa_contenido_y_rellena_vacios(self):
+        self.init()
+        base = os.path.join(self.ws, "projects", "template_project")
+        custom = os.path.join(base, "sop", "rules.md")
+        self.write(custom, "mis reglas\n")
+        empty = os.path.join(base, "sop", "workflow.md")
+        self.write(empty, "")
+        self.init()
+        self.assertEqual(slurp(custom), "mis reglas\n")
+        self.assertIn("Flujo de trabajo", slurp(empty))
+
+    def test_archivos_sin_plantilla_siguen_igual(self):
+        self.init()
+        self.assertEqual(os.path.getsize(os.path.join(self.ws, "core", "init.md")), 0)
+        header = slurp(os.path.join(self.ws, "agents", "coding_agent.md"))
+        self.assertTrue(header.startswith("---\nname: Coding Agent"))
+
+    def test_proyecto_nuevo_sin_marcadores_ni_vacios(self):
+        project = self.new_project()
+        for dirpath, _dirs, files in os.walk(project):
+            for fname in files:
+                path = os.path.join(dirpath, fname)
+                self.assertGreater(os.path.getsize(path), 0, f"vacío: {path}")
+                self.assertNotIn("@@", slurp(path), f"marcador sin resolver: {path}")
+        self.assertIn("# demo", self.read(project, "project.md"))
+        self.assertIn("Proyecto de prueba", self.read(project, "project.md"))
+        self.assertIn("CLAUDE.md — demo", self.read(project, "CLAUDE.md"))
+        self.assertTrue(self.read(project, "state.md").startswith("Estado: 0 en curso"))
+        self.assertIn("[nota] proyecto creado", self.read(project, "state.md"))
+
+    def test_siete_carpetas_y_notas_de_asignacion(self):
+        project = self.new_project()
+        for folder in ("agents", "skills", "tools", "artifacts", "execution", "sop", "tasks"):
+            self.assertTrue(os.path.isdir(os.path.join(project, folder)), folder)
+        for rel in ("agents/assigned_agents.md", "agents/agent_context.md", "skills/assigned_skills.md",
+                    "skills/skill_context.md", "tools/assigned_tools.md", "tools/tool_usage.md", "tools/tool_state.json"):
+            self.assertTrue(os.path.isfile(os.path.join(project, rel)), rel)
+
+    def test_settings_del_proyecto_tienen_hooks_permisos_y_ruta_al_script(self):
+        project = self.new_project()
+        settings = json.loads(self.read(project, ".claude", "settings.json"))
+        for event in HOOK_EVENTS:
+            self.assertIn(event, settings["hooks"])
+            command = settings["hooks"][event][0]["hooks"][0]["command"]
+            self.assertIn(SCRIPT, command)
+            self.assertIn(" hook ", command)
+        self.assertEqual(settings["permissions"]["allow"], ["Bash(aw task *)", "Bash(aw decide *)", "Bash(aw log *)"])
+        self.assertEqual(settings["permissions"]["additionalDirectories"],
+                         [os.path.join(self.ws, d) for d in ("agents", "skills", "tools")])
+
+    def test_nombres_invalidos(self):
+        self.init()
+        for bad in ("../fuera", "template_project", ".oculto"):
+            result = self.aw("project", "new", bad)
+            self.assertEqual(result.returncode, 2, bad)
+        self.assertEqual(self.aw("project", "new", "a").returncode, 0)
+        self.assertEqual(self.aw("project", "new", "a").returncode, 2)
+
+    def test_project_new_sin_init_da_error_claro(self):
+        result = self.aw("project", "new", "x")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("aw init", result.stderr)
+
+    def test_menu_sigue_funcionando(self):
+        self.new_project()
+        listing = self.aw(stdin="2\n0\n")
+        self.assertEqual(listing.returncode, 0)
+        self.assertIn("- demo: Estado: 0 en curso", listing.stdout)
+        doctor = self.aw(stdin="10\n0\n")
+        self.assertIn("aw doctor", doctor.stdout)
+        sync = self.aw(stdin="11\ns\n0\n")
+        self.assertIn("Modo prueba", sync.stdout)
+        agents = self.aw(stdin="6\na\nc\n0\n")
+        self.assertIn("Coding Agent", agents.stdout)
+
+
+class TestTareas(AwCase):
+    def task_lines(self, project, name):
+        return [l for l in self.read(project, "tasks", name).splitlines() if re.match(r"- \[[ x]\] T-\d+", l)]
+
+    def test_add_ordena_por_prioridad_y_numera(self):
+        project = self.new_project()
+        self.assertEqual(self.aw("task", "add", "tarea normal", cwd=project).stdout.strip(), "T-001 creada [P2]")
+        self.aw("task", "add", "urgente", "--prio", "P0", cwd=project)
+        self.aw("task", "add", "otra normal", cwd=project)
+        self.aw("task", "add", "baja", "--prio", "p3", cwd=project)
+        lines = [l for l in self.read(project, "tasks", "backlog.md").splitlines() if l.startswith("- [ ]")]
+        self.assertEqual([re.search(r"T-\d+", l).group(0) for l in lines], ["T-002", "T-001", "T-003", "T-004"])
+        self.assertTrue(self.read(project, "tasks", "backlog.md").startswith("# Pendientes"))
+
+    def test_start_y_done_mueven_la_tarea(self):
+        project = self.new_project()
+        self.aw("task", "add", "hacer algo", "--prio", "P1", cwd=project)
+        self.assertIn("en curso", self.aw("task", "start", "T-001", cwd=project).stdout)
+        self.assertEqual(self.task_lines(project, "backlog.md"), [])
+        self.assertIn("(iniciada", self.read(project, "tasks", "active.md"))
+        self.assertIn("hecha", self.aw("task", "done", "t1", cwd=project).stdout)
+        self.assertEqual(self.task_lines(project, "active.md"), [])
+        done = self.read(project, "tasks", "done.md")
+        self.assertIn("- [x] T-001 [P1] hacer algo (creada", done)
+        self.assertIn("(hecha", done)
+
+    def test_done_directo_desde_pendientes(self):
+        project = self.new_project()
+        self.aw("task", "add", "rápida", cwd=project)
+        self.assertEqual(self.aw("task", "done", "T-001", cwd=project).returncode, 0)
+        self.assertIn("T-001", self.read(project, "tasks", "done.md"))
+
+    def test_errores_de_tareas(self):
+        project = self.new_project()
+        self.assertEqual(self.aw("task", "start", "T-009", cwd=project).returncode, 2)
+        self.assertEqual(self.aw("task", "done", "xx", cwd=project).returncode, 2)
+        self.assertEqual(self.aw("task", "add", "", cwd=project).returncode, 2)
+        self.assertEqual(self.aw("task", "add", "algo", "--prio", "P9", cwd=project).returncode, 2)
+        self.aw("task", "add", "a", cwd=project)
+        self.aw("task", "start", "T-001", cwd=project)
+        self.assertIn("ya está en curso", self.aw("task", "start", "T-001", cwd=project).stderr)
+        self.aw("task", "done", "T-001", cwd=project)
+        self.assertIn("ya está hecha", self.aw("task", "done", "T-001", cwd=project).stderr)
+        self.assertIn("ya está hecha", self.aw("task", "start", "T-001", cwd=project).stderr)
+
+    def test_los_ids_no_se_reutilizan(self):
+        project = self.new_project()
+        self.aw("task", "add", "uno", cwd=project)
+        self.aw("task", "done", "T-001", cwd=project)
+        self.assertEqual(self.aw("task", "add", "dos", cwd=project).stdout.strip(), "T-002 creada [P2]")
+
+    def test_titulo_multilinea_se_normaliza(self):
+        project = self.new_project()
+        self.aw("task", "add", "línea uno\nlínea dos", cwd=project)
+        self.assertIn("T-001 [P2] línea uno línea dos", self.read(project, "tasks", "backlog.md"))
+
+    def test_list_muestra_secciones(self):
+        project = self.new_project()
+        self.aw("task", "add", "a", "--prio", "P1", cwd=project)
+        self.aw("task", "add", "b", cwd=project)
+        self.aw("task", "start", "T-001", cwd=project)
+        out = self.aw("task", "list", cwd=project).stdout
+        self.assertIn("En curso:\n  T-001 [P1] a", out)
+        self.assertIn("Pendientes:\n  T-002 [P2] b", out)
+        self.assertNotIn("Hechas", out)
+        self.assertIn("Hechas:", self.aw("task", "list", "--all", cwd=project).stdout)
+
+    def test_state_refleja_las_tareas(self):
+        project = self.new_project()
+        self.aw("task", "add", "a", "--prio", "P1", cwd=project)
+        self.aw("task", "add", "b", cwd=project)
+        self.aw("task", "start", "T-001", cwd=project)
+        state = self.read(project, "state.md")
+        self.assertTrue(state.startswith("Estado: 1 en curso · 1 pendientes · 0 hechas"))
+        self.assertIn("- T-001 [P1] a\n", state)
+        self.assertNotIn("(iniciada", state)
+
+    def test_funciona_desde_subcarpeta_y_con_project(self):
+        project = self.new_project()
+        sub = os.path.join(project, "artifacts", "x")
+        os.makedirs(sub)
+        self.assertEqual(self.aw("task", "add", "desde sub", cwd=sub).returncode, 0)
+        self.assertEqual(self.aw("task", "add", "por nombre", "--project", "demo", cwd=self.tmp).returncode, 0)
+        self.assertIn("por nombre", self.read(project, "tasks", "backlog.md"))
+
+    def test_no_escribe_fuera_de_un_proyecto(self):
+        self.new_project()
+        outside = self.aw("task", "add", "x", cwd=self.tmp)
+        self.assertEqual(outside.returncode, 2)
+        self.assertIn("No se está dentro de un proyecto aw", outside.stderr)
+        for bad in ("../demo", "nada", ".x", "a/b"):
+            self.assertEqual(self.aw("task", "add", "x", "--project", bad, cwd=self.tmp).returncode, 2, bad)
+        template = self.aw("task", "add", "x", "--project", "template_project", cwd=self.tmp)
+        self.assertEqual(template.returncode, 2)
+        self.assertIn("plantilla", template.stderr)
+        self.assertEqual(self.aw("task", "add", "x", cwd=os.path.join(self.ws, "projects", "template_project")).returncode, 2)
+
+
+class TestDecisionesYRegistro(AwCase):
+    def test_decide_registra_con_motivo_y_alternativas(self):
+        project = self.new_project()
+        result = self.aw("decide", "Usar Python", "--why", "sin dependencias", "--alt", "Node", cwd=project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.read(project, "execution", "decisions.md")
+        self.assertRegex(text, r"## \d{4}-\d{2}-\d{2} — Usar Python\n- Motivo: sin dependencias\n- Alternativas: Node\n")
+        self.assertIn("[decisión] Usar Python", self.read(project, "execution", "run_log.md"))
+        self.assertIn("## Última decisión\n- ", self.read(project, "state.md"))
+        self.assertIn("Usar Python", self.read(project, "state.md"))
+
+    def test_decide_exige_motivo(self):
+        project = self.new_project()
+        self.assertNotEqual(self.aw("decide", "algo", cwd=project).returncode, 0)
+        blank = self.aw("decide", "algo", "--why", "   ", cwd=project)
+        self.assertEqual(blank.returncode, 2)
+        self.assertIn("motivo", blank.stderr)
+        self.assertNotIn("algo", self.read(project, "execution", "decisions.md"))
+
+    def test_log_agrega_nota(self):
+        project = self.new_project()
+        self.assertEqual(self.aw("log", "revisé", "el", "brief", cwd=project).returncode, 0)
+        self.assertIn("[nota] revisé el brief", self.read(project, "execution", "run_log.md"))
+
+    def test_state_manual_no_se_pisa(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "state.md"), "Estado: lo escribí yo\n")
+        self.aw("task", "add", "algo", cwd=project)
+        result = self.aw("state", cwd=project)
+        self.assertEqual(self.read(project, "state.md"), "Estado: lo escribí yo\n")
+        self.assertIn("texto manual", result.stderr)
+
+    def test_state_heredado_se_reemplaza(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "state.md"), "Estado: iniciado\n")
+        self.aw("state", "--quiet", cwd=project)
+        self.assertTrue(self.read(project, "state.md").startswith("Estado: 0 en curso"))
+        self.write(os.path.join(project, "state.md"), "")
+        self.aw("state", "--quiet", cwd=project)
+        self.assertIn("aw:auto", self.read(project, "state.md"))
+
+    def test_menu_muestra_decisiones_y_tareas(self):
+        project = self.new_project()
+        self.aw("decide", "Elegir X", "--why", "porque sí", cwd=project)
+        self.aw("task", "add", "pendiente 1", cwd=project)
+        self.aw("task", "start", "T-001", cwd=project)
+        self.assertIn("Elegir X", self.aw(stdin="4\n1\n0\n").stdout)
+        self.assertIn("T-001", self.aw(stdin="3\n1\n0\n").stdout)
+
+    def test_rotacion_del_registro(self):
+        project = self.new_project()
+        aw = load_aw(self.ws)
+        for i in range(450):
+            aw.log_event(project, "nota", f"evento {i}")
+        lines = self.read(project, "execution", "run_log.md").splitlines()
+        self.assertTrue(lines[0].startswith("# Registro de ejecución"))
+        self.assertLessEqual(sum(1 for l in lines if l.startswith("- ")), 400)
+        self.assertIn("evento 449", "\n".join(lines))
+        archive = self.read(project, "execution", "run_log_archivo.md")
+        self.assertIn("evento 0", archive)
+        self.assertNotIn("evento 449", archive)
+
+
+class TestHooks(AwCase):
+    def payload(self, project, **extra):
+        data = {"session_id": "s1", "cwd": project}
+        data.update(extra)
+        return data
+
+    def test_session_start_carga_contexto(self):
+        project = self.new_project()
+        self.aw("task", "add", "tarea activa", "--prio", "P1", cwd=project)
+        self.aw("task", "start", "T-001", cwd=project)
+        result = self.hook("session-start", self.payload(project, source="startup"), project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "SessionStart")
+        context = output["additionalContext"]
+        self.assertIn("Proyecto demo", context)
+        self.assertIn("T-001 [P1] tarea activa", context)
+        self.assertIn("iniciada (startup)", context)
+        self.assertNotIn("aw:auto", context)
+        self.assertLessEqual(len(context.splitlines()), 45)
+        self.assertIn("[sesión] iniciada (startup)", self.read(project, "execution", "run_log.md"))
+
+    def test_session_start_limita_el_tamano(self):
+        project = self.new_project()
+        aw = load_aw(self.ws)
+        for i in range(200):
+            aw.log_event(project, "nota", "x" * 300 + str(i))
+        context = json.loads(self.hook("session-start", self.payload(project), project).stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(context), 4000)
+
+    def test_session_start_desde_subcarpeta(self):
+        project = self.new_project()
+        sub = os.path.join(project, "sop")
+        result = self.hook("session-start", {"session_id": "s2", "cwd": sub}, sub)
+        self.assertIn("Proyecto demo", json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"])
+
+    def test_hooks_fuera_de_proyecto_son_silenciosos(self):
+        self.new_project()
+        for event in ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end"):
+            result = self.hook(event, {"session_id": "z", "cwd": self.tmp}, self.tmp)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""), event)
+
+    def test_hooks_no_tocan_la_plantilla(self):
+        self.new_project()
+        template = os.path.join(self.ws, "projects", "template_project")
+        before = self.read(template, "execution", "run_log.md")
+        self.hook("session-start", {"session_id": "t", "cwd": template}, template)
+        self.hook("session-end", {"session_id": "t", "cwd": template}, template)
+        self.assertEqual(self.read(template, "execution", "run_log.md"), before)
+
+    def test_hooks_toleran_entrada_basura_y_eventos_desconocidos(self):
+        project = self.new_project()
+        for event in ("session-start", "stop", "session-end", "no-existe", ""):
+            result = self.aw("hook", event, cwd=project, stdin="esto no es json {{{")
+            self.assertEqual(result.returncode, 0, event)
+        self.assertEqual(self.aw("hook", cwd=project, stdin="").returncode, 0)
+
+    def test_post_tool_registra_solo_commits(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "primer commit de prueba")
+        run_log = os.path.join(project, "execution", "run_log.md")
+        before = self.read(project, "execution", "run_log.md")
+        for command in ("ls -la", "git log --grep commit", "echo git commit-tree", "git status"):
+            self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": command}), project)
+        self.assertEqual(slurp(run_log), before)
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": 'git commit -m "x"'}), project)
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "cd sub && git -c user.name=a commit -m y"}), project)
+        entries = [l for l in self.read(project, "execution", "run_log.md").splitlines() if "[commit]" in l]
+        self.assertEqual(len(entries), 2)
+        self.assertIn("primer commit de prueba", entries[0])
+
+    def test_tool_failure_guarda_solo_primera_linea_y_sin_secretos(self):
+        project = self.new_project()
+        secret_command = "curl -H 'Authorization: Bearer abc123SECRETVALUE' https://x.test"
+        error = "curl: (6) Could not resolve host\nsegunda línea que no debe guardarse"
+        self.hook("tool-failure", self.payload(project, tool_name="Bash", tool_input={"command": secret_command}, error=error), project)
+        text = self.read(project, "execution", "errors.md")
+        self.assertRegex(text, r"- \d{4}-\d{2}-\d{2} \d{2}:\d{2} \[Bash\] curl: \(6\) Could not resolve host\n")
+        self.assertNotIn("segunda línea", text)
+        self.assertNotIn("abc123SECRETVALUE", text)
+        self.assertNotIn("Authorization", text)
+        self.hook("tool-failure", self.payload(project, tool_name="Bash", error="fallo con Authorization: Bearer abc123SECRETVALUE y password=hunter2"), project)
+        text = self.read(project, "execution", "errors.md")
+        self.assertNotIn("abc123SECRETVALUE", text)
+        self.assertNotIn("hunter2", text)
+
+    def test_tool_failure_une_codigo_de_salida_con_el_motivo(self):
+        # Formato real que entrega Claude Code: "Exit code N" en la primera línea y el motivo en la segunda.
+        project = self.new_project()
+        error = "Exit code 2\nls: cannot access './no-existe': No such file or directory"
+        self.hook("tool-failure", self.payload(project, tool_name="Bash", tool_input={"command": "ls ./no-existe"}, error=error), project)
+        self.assertIn("[Bash] Exit code 2 — ls: cannot access './no-existe': No such file or directory\n", self.read(project, "execution", "errors.md"))
+        self.assertNotIn("ls ./no-existe", self.read(project, "execution", "errors.md"))  # el comando no se guarda
+
+    def test_tool_failure_acepta_respuesta_no_textual(self):
+        project = self.new_project()
+        self.hook("tool-failure", self.payload(project, tool_name="Edit", tool_response={"error": "no se pudo"}), project)
+        self.assertIn("[Edit]", self.read(project, "execution", "errors.md"))
+
+    def test_pre_compact_registra_y_actualiza_estado(self):
+        project = self.new_project()
+        self.aw("task", "add", "algo", cwd=project)
+        self.hook("pre-compact", self.payload(project, trigger="auto"), project)
+        self.assertIn("[compactación] auto", self.read(project, "execution", "run_log.md"))
+
+    def test_stop_avisa_una_sola_vez_si_hay_commits_sin_registro(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "c1")
+        self.hook("session-start", self.payload(project), project)
+        silent = self.hook("stop", self.payload(project), project)
+        self.assertEqual(silent.stdout, "")
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m c1"}), project)
+        first = self.hook("stop", self.payload(project), project)
+        message = json.loads(first.stdout)["systemMessage"]
+        self.assertIn("1 commit(s)", message)
+        self.assertIn("aw decide", message)
+        self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
+
+    def test_stop_no_avisa_si_se_registro_algo(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "c1")
+        self.hook("session-start", self.payload(project), project)
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m c1"}), project)
+        self.aw("decide", "Algo", "--why", "porque", cwd=project)
+        self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
+
+    def test_stop_sin_commits_es_silencioso_y_actualiza_estado(self):
+        project = self.new_project()
+        self.hook("session-start", self.payload(project), project)
+        self.write(os.path.join(project, "tasks", "backlog.md"), "# Pendientes\n- [ ] T-001 [P1] editada a mano (creada 2026-01-01)\n")
+        result = self.hook("stop", self.payload(project), project)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("1 pendientes", self.read(project, "state.md"))
+
+    def test_session_end_resume_sesion(self):
+        project = self.new_project()
+        self.hook("session-start", self.payload(project), project)
+        for tool in ("Bash", "Bash", "Edit", "Read"):
+            self.hook("post-tool", self.payload(project, tool_name=tool, tool_input={}), project)
+        self.hook("session-end", self.payload(project, reason="clear"), project)
+        run_log = self.read(project, "execution", "run_log.md")
+        self.assertIn("[sesión] terminada: 0 commit(s), 4 usos de herramientas (clear)", run_log)
+        usage = self.read(project, "tools", "tool_usage.md")
+        self.assertRegex(usage, r"- \d{4}-\d{2}-\d{2} \| s1 \| Bash×2, Edit×1, Read×1\n")
+        state = json.loads(self.read(project, "tools", "tool_state.json"))
+        self.assertEqual(state["ultima_sesion"]["herramientas"], {"Bash": 2, "Edit": 1, "Read": 1})
+        month = self.read(self.ws, "logs", "current_month.md")
+        self.assertIn("demo — terminada: 0 commit(s), 4 usos de herramientas (clear)", month)
+        self.assertRegex(month, r"^# Registro de \d{4}-\d{2}\n")
+        self.assertEqual(os.listdir(self.sessions), [])
+
+    def test_session_end_rota_el_log_mensual(self):
+        project = self.new_project()
+        self.write(os.path.join(self.ws, "logs", "current_month.md"), "# Registro de 2020-01\n\n- viejo\n")
+        self.hook("session-end", self.payload(project), project)
+        self.assertIn("- viejo", self.read(self.ws, "logs", "2020-01.md"))
+        current = self.read(self.ws, "logs", "current_month.md")
+        self.assertNotIn("viejo", current)
+        self.assertIn("demo — terminada", current)
+
+    def test_log_mensual_con_texto_ajeno_no_se_rota(self):
+        project = self.new_project()
+        self.write(os.path.join(self.ws, "logs", "current_month.md"), "notas mías\n")
+        self.hook("session-end", self.payload(project), project)
+        current = self.read(self.ws, "logs", "current_month.md")
+        self.assertTrue(current.startswith("notas mías\n"))
+        self.assertIn("demo — terminada", current)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.ws, "logs"))), ["current_month.md", "debug.md"])
+
+    def test_errores_internos_van_a_debug_y_no_rompen(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "tools", "tool_state.json"), "{ esto no es json")
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={}), project)
+        result = self.hook("session-end", self.payload(project), project)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.read(project, "tools", "tool_state.json"), "{ esto no es json")
+
+
+class TestSync(AwCase):
+    def legacy_project(self, name="viejo"):
+        """Proyecto como los creados antes de este cambio: archivos vacíos y sin skills/, CLAUDE.md ni .claude/."""
+        self.init()
+        project = self.project(name)
+        for rel in ("tasks/backlog.md", "tasks/active.md", "tasks/done.md", "execution/run_log.md", "execution/decisions.md",
+                    "execution/errors.md", "agents/assigned_agents.md", "agents/agent_context.md", "tools/tool_usage.md",
+                    "artifacts/outputs.md", "artifacts/code_snippets.md", "artifacts/assets_index.md", "sop/workflow.md",
+                    "sop/rules.md", "sop/conventions.md", "sop/README.md", "memory.md"):
+            self.write(os.path.join(project, rel), "")
+        self.write(os.path.join(project, "tools", "tool_state.json"), "")
+        self.write(os.path.join(project, "context_index.json"), "")
+        self.write(os.path.join(project, "project.md"), "# viejo\n\nMi descripción original\n")
+        self.write(os.path.join(project, "state.md"), "Estado: iniciado\n")
+        return project
+
+    def test_dry_run_no_cambia_nada(self):
+        project = self.legacy_project()
+        snapshot = self.snapshot(project)
+        result = self.aw("sync", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Modo prueba", result.stdout)
+        self.assertIn("crear: skills/assigned_skills.md", result.stdout)
+        self.assertIn("crear: CLAUDE.md", result.stdout)
+        self.assertIn("crear: .claude/settings.json", result.stdout)
+        self.assertIn("rellenar: tasks/backlog.md", result.stdout)
+        self.assertEqual(self.snapshot(project), snapshot)
+
+    def snapshot(self, project):
+        data = {}
+        for dirpath, _dirs, files in os.walk(project):
+            for fname in files:
+                path = os.path.join(dirpath, fname)
+                data[os.path.relpath(path, project)] = slurp(path)
+        return data
+
+    def test_sync_completa_un_proyecto_antiguo_sin_pisar_lo_suyo(self):
+        project = self.legacy_project()
+        self.write(os.path.join(project, "sop", "rules.md"), "mis reglas propias\n")
+        result = self.aw("sync")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Mi descripción original", self.read(project, "project.md"))
+        self.assertEqual(self.read(project, "sop", "rules.md"), "mis reglas propias\n")
+        for rel in ("skills/assigned_skills.md", "skills/skill_context.md", "tools/assigned_tools.md", "CLAUDE.md", ".claude/settings.json"):
+            self.assertTrue(os.path.isfile(os.path.join(project, rel)), rel)
+        for dirpath, _dirs, files in os.walk(project):
+            for fname in files:
+                self.assertGreater(os.path.getsize(os.path.join(dirpath, fname)), 0, fname)
+        self.assertIn("CLAUDE.md — viejo", self.read(project, "CLAUDE.md"))
+        self.assertNotIn("@@", self.read(project, "CLAUDE.md"))
+        self.assertTrue(self.read(project, "state.md").startswith("Estado: 0 en curso"))
+        index = json.loads(self.read(project, "context_index.json"))
+        self.assertIn("project.md", index["archivos"])
+        self.assertEqual(index["proyecto"], "viejo")
+
+    def test_sync_es_idempotente(self):
+        self.legacy_project()
+        self.aw("sync")
+        second = self.aw("sync")
+        self.assertIn("- viejo: al día", second.stdout)
+        self.assertIn("Total: 0 cambio(s)", second.stdout)
+        self.assertEqual([f for f in os.listdir(os.path.join(self.project("viejo"), ".claude")) if ".bak-" in f], [])
+
+    def test_sync_no_toca_claude_md_existente_ni_state_manual(self):
+        project = self.legacy_project()
+        self.write(os.path.join(project, "CLAUDE.md"), "el mío\n")
+        self.write(os.path.join(project, "state.md"), "Estado: escrito a mano\n")
+        self.aw("sync")
+        self.assertEqual(self.read(project, "CLAUDE.md"), "el mío\n")
+        self.assertEqual(self.read(project, "state.md"), "Estado: escrito a mano\n")
+
+    def test_sync_fusiona_settings_sin_perder_nada_y_con_respaldo(self):
+        project = self.legacy_project()
+        custom = {
+            "permissions": {"allow": ["Bash(ls)"], "deny": ["Read(./.env)"]},
+            "hooks": {
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "mi-freno.sh"}]}],
+                "SessionStart": [{"hooks": [{"type": "command", "command": "mi-inicio.sh"}]}],
+            },
+            "outputStyle": "Concise",
+        }
+        path = os.path.join(project, ".claude", "settings.json")
+        self.write(path, json.dumps(custom))
+        result = self.aw("sync")
+        self.assertIn("actualizar: .claude/settings.json", result.stdout)
+        merged = json.loads(slurp(path))
+        self.assertEqual(merged["outputStyle"], "Concise")
+        self.assertEqual(merged["permissions"]["deny"], ["Read(./.env)"])
+        self.assertEqual(merged["permissions"]["allow"][0], "Bash(ls)")
+        self.assertIn("Bash(aw task *)", merged["permissions"]["allow"])
+        self.assertEqual(merged["hooks"]["PreToolUse"], custom["hooks"]["PreToolUse"])
+        commands = [h["command"] for g in merged["hooks"]["SessionStart"] for h in g["hooks"]]
+        self.assertEqual(commands[0], "mi-inicio.sh")
+        self.assertTrue(any("hook session-start" in c for c in commands))
+        for event in HOOK_EVENTS:
+            self.assertIn(event, merged["hooks"])
+        backups = [f for f in os.listdir(os.path.dirname(path)) if ".bak-" in f]
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(json.loads(slurp(os.path.join(os.path.dirname(path), backups[0]))), custom)
+        again = self.aw("sync")
+        self.assertIn("al día", again.stdout)
+        self.assertEqual(len([f for f in os.listdir(os.path.dirname(path)) if ".bak-" in f]), 1)
+
+    def test_sync_no_duplica_hooks_ya_instalados(self):
+        project = self.new_project()
+        path = os.path.join(project, ".claude", "settings.json")
+        before = slurp(path)
+        self.aw("sync")
+        self.assertEqual(slurp(path), before)
+
+    def test_sync_con_settings_invalido_no_lo_toca(self):
+        project = self.legacy_project()
+        path = os.path.join(project, ".claude", "settings.json")
+        self.write(path, "{ roto")
+        result = self.aw("sync")
+        self.assertIn("JSON inválido", result.stdout)
+        self.assertEqual(slurp(path), "{ roto")
+
+    def test_sync_indices_de_artifacts(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "artifacts", "informe.html"), "<html></html>")
+        self.write(os.path.join(project, "artifacts", "img", "logo.png"), "x")
+        self.write(os.path.join(project, "artifacts", "outputs.md"), "# Entregables\nmi nota\n\n<!-- aw:auto:inicio -->\nviejo\n<!-- aw:auto:fin -->\n")
+        self.aw("sync")
+        outputs = self.read(project, "artifacts", "outputs.md")
+        self.assertIn("mi nota", outputs)
+        self.assertIn("- `artifacts/informe.html`", outputs)
+        self.assertNotIn("viejo", outputs)
+        self.assertNotIn("logo.png", outputs)
+        assets = self.read(project, "artifacts", "assets_index.md")
+        self.assertIn("- `artifacts/img/logo.png`", assets)
+        self.assertNotIn("informe.html", assets)
+
+    def test_sync_de_un_solo_proyecto_y_nombre_inexistente(self):
+        self.legacy_project("a")
+        self.write(os.path.join(self.project("b"), "state.md"), "Estado: iniciado\n")
+        os.makedirs(os.path.join(self.project("b"), "tasks"))
+        result = self.aw("sync", "a", "nada")
+        self.assertIn("- a:", result.stdout)
+        self.assertIn("- nada: no existe", result.stdout)
+        self.assertNotIn("- b:", result.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.project("b"), "CLAUDE.md")))
+
+    def test_sync_actualiza_la_plantilla_del_workspace(self):
+        self.init()
+        template = os.path.join(self.ws, "projects", "template_project", "skills")
+        shutil.rmtree(template)
+        self.aw("sync")
+        self.assertTrue(os.path.isfile(os.path.join(template, "assigned_skills.md")))
+
+
+class TestDoctor(AwCase):
+    def test_proyecto_nuevo_sin_pendientes_graves(self):
+        self.new_project()
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("✓ hooks de aw instalados", result.stdout)
+        self.assertIn("✓ estructura completa", result.stdout)
+        self.assertIn("campo(s) '(completar)' por rellenar", result.stdout)
+        self.assertIn("✓ state.md al día", result.stdout)
+        self.assertNotIn("✕", result.stdout)
+
+    def test_detecta_hooks_ausentes_json_roto_y_script_inexistente(self):
+        project = self.new_project()
+        path = os.path.join(project, ".claude", "settings.json")
+        settings = json.loads(slurp(path))
+        del settings["hooks"]["Stop"]
+        self.write(path, json.dumps(settings))
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("✕ faltan hooks: stop", result.stdout)
+        settings = json.loads(slurp(path))
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] = 'python3 "/no/existe/generate.py" hook session-start'
+        self.write(path, json.dumps(settings))
+        self.assertIn("apunta a un script que no existe", self.aw("doctor").stdout)
+        self.write(path, "{ roto")
+        self.assertIn("JSON inválido", self.aw("doctor").stdout)
+        os.remove(path)
+        self.assertIn("✕ .claude/settings.json no existe", self.aw("doctor").stdout)
+
+    def test_detecta_estado_manual_y_permisos_faltantes(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "state.md"), "Estado: a mano\n")
+        path = os.path.join(project, ".claude", "settings.json")
+        settings = json.loads(slurp(path))
+        settings["permissions"]["allow"] = []
+        self.write(path, json.dumps(settings))
+        out = self.aw("doctor").stdout
+        self.assertIn("▲ state.md tiene texto manual", out)
+        self.assertIn("▲ faltan permisos", out)
+
+    def test_compara_agentes_y_skills_asignados_con_el_disco(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "agents", "assigned_agents.md"),
+                   "# Agentes\n\n| Tarea | Agente (archivo) | Notas |\n|---|---|---|\n| Redacción | 2_agente_redactor.md | |\n| Otra | (completar) | |\n")
+        self.write(os.path.join(project, "skills", "assigned_skills.md"),
+                   "# Skills\n\n| Tarea | Skill | Notas |\n|---|---|---|\n| Auditar | auditor-de-procesos.skill | |\n")
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("✕ agentes asignados: no existe 2_agente_redactor.md (fila 'Redacción')", result.stdout)
+        self.assertIn("✕ skills asignados: no existe auditor-de-procesos.skill", result.stdout)
+        self.write(os.path.join(self.ws, "agents", "2_agente_redactor.md"), "instrucciones")
+        os.makedirs(os.path.join(self.ws, "skills", "auditor-de-procesos.skill"))
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("asignados", result.stdout)
+
+    def test_compara_herramientas_con_mcp_json(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "tools", "assigned_tools.md"),
+                   "# Herramientas\n\n| Herramienta | Uso | Config |\n|---|---|---|\n| Airtable | tablas | .mcp.json |\n| Bash | comandos | nativa |\n")
+        self.assertIn("herramienta 'Airtable' declarada en .mcp.json pero no figura ahí", self.aw("doctor").stdout)
+        self.write(os.path.join(project, ".mcp.json"), json.dumps({"mcpServers": {"airtable": {}}}))
+        self.assertNotIn("Airtable", self.aw("doctor").stdout)
+
+    def test_detecta_commits_sin_decisiones_y_archivos_vacios(self):
+        project = self.new_project()
+        aw = load_aw(self.ws)
+        for i in range(3):
+            aw.log_event(project, "commit", f"abc{i} algo")
+        self.write(os.path.join(project, "sop", "rules.md"), "")
+        out = self.aw("doctor").stdout
+        self.assertIn("3 commit(s) registrados y ninguna decisión", out)
+        self.assertIn("1 archivo(s) vacío(s)", out)
+
+    def test_doctor_de_un_proyecto_y_proyecto_inexistente(self):
+        self.new_project("uno")
+        self.aw("project", "new", "dos")
+        out = self.aw("doctor", "uno").stdout
+        self.assertIn("Proyecto uno", out)
+        self.assertNotIn("Proyecto dos", out)
+        missing = self.aw("doctor", "nada")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("✕ no existe", missing.stdout)
+
+
+class TestFunciones(AwCase):
+    def setUp(self):
+        super().setUp()
+        self.aw_mod = load_aw(self.ws)
+
+    def test_redact(self):
+        r = self.aw_mod.redact
+        self.assertNotIn("abc123", r("Authorization: Bearer abc123"))
+        self.assertNotIn("hunter2", r("password=hunter2"))
+        self.assertNotIn("supersecretvalue", r("api_key: supersecretvalue"))
+        self.assertNotIn("ghp_" + "a" * 20, r("token ghp_" + "a" * 20))
+        self.assertNotIn("A" * 40, r("clave " + "A" * 40))
+        self.assertEqual(r("Could not resolve host"), "Could not resolve host")
+        self.assertEqual(r("invalid token provided"), "invalid token provided")
+
+    def test_clean_title(self):
+        self.assertEqual(self.aw_mod.clean_title("hacer algo (creada 2026-01-01) (iniciada 2026-01-02)"), "hacer algo")
+        self.assertEqual(self.aw_mod.clean_title("con (paréntesis) propios (creada 2026-01-01)"), "con (paréntesis) propios")
+
+    def test_insert_task_line_ordena_y_conserva_encabezado(self):
+        insert = self.aw_mod.insert_task_line
+        text = "# Pendientes\n<!-- x -->\n- [ ] T-001 [P0] a\n- [ ] T-002 [P2] b\n"
+        out = insert(text, "- [ ] T-003 [P1] c", "P1")
+        self.assertEqual(out.splitlines(), ["# Pendientes", "<!-- x -->", "- [ ] T-001 [P0] a", "- [ ] T-003 [P1] c", "- [ ] T-002 [P2] b"])
+        self.assertEqual(insert("", "- [ ] T-001 [P2] a", "P2"), "- [ ] T-001 [P2] a\n")
+
+    def test_git_commit_regex(self):
+        rx = self.aw_mod.GIT_COMMIT_RE
+        for yes in ("git commit -m x", "git commit", "cd a && git commit -m y", "git -c user.name=a commit -m y",
+                    "git --no-pager commit", "npm test; git commit -am z"):
+            self.assertTrue(rx.search(yes), yes)
+        for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls"):
+            self.assertFalse(rx.search(no), no)
+
+    def test_merge_settings_no_modifica_el_original(self):
+        existing = {"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "otro.sh"}]}]}}
+        template = {"permissions": {"allow": ["Bash(aw task *)"]},
+                    "hooks": {"Stop": [{"hooks": [{"type": "command", "command": 'python3 "x/generate.py" hook stop'}]}]}}
+        merged, notes = self.aw_mod.merge_settings(existing, template)
+        self.assertEqual(existing["permissions"]["allow"], ["Bash(ls)"])
+        self.assertEqual(len(merged["hooks"]["Stop"]), 2)
+        self.assertEqual(len(notes), 2)
+        merged_again, notes_again = self.aw_mod.merge_settings(merged, template)
+        self.assertEqual(notes_again, [])
+        self.assertEqual(merged_again, merged)
+
+    def test_render_json_escapa_comillas(self):
+        rendered = self.aw_mod.render('{"c": "@@AW_CMD@@ hook x"}', {"AW_CMD": 'python3 "/a b/generate.py"'}, json_safe=True)
+        self.assertEqual(json.loads(rendered)["c"], 'python3 "/a b/generate.py" hook x')
+        self.assertEqual(self.aw_mod.render("@@DESCONOCIDA@@", {}), "@@DESCONOCIDA@@")
+
+
+if __name__ == "__main__":
+    unittest.main()
