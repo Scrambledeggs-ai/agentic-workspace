@@ -4,9 +4,25 @@ import json
 import shutil
 import stat
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-STRUCTURE_FILE = os.path.join(ROOT, "structure.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+STRUCTURE_FILE = os.path.join(HERE, "structure.json")
 WRAPPER_NAME = "aw"
+
+
+def find_root():
+    # Raíz del workspace, separada del código: AW_HOME si está definida; si no,
+    # dos niveles arriba cuando el script vive en <raíz>/projects/<nombre>/ y
+    # <raíz>/projects/template_project existe; si no, la carpeta del script.
+    env = os.environ.get("AW_HOME")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    projects_dir = os.path.dirname(HERE)
+    if os.path.isdir(os.path.join(projects_dir, "template_project")):
+        return os.path.dirname(projects_dir)
+    return HERE
+
+
+ROOT = find_root()
 
 # Encabezados por defecto para los archivos de agents/, skills/ y tools/
 # que ya vienen definidos en structure.json, para que aparezcan con
