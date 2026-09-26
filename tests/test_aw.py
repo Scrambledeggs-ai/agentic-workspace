@@ -341,6 +341,13 @@ class TestTareas(AwCase):
         self.assertEqual(self.aw("task", "add", "por nombre", "--project", "demo", cwd=self.tmp).returncode, 0)
         self.assertIn("por nombre", self.read(project, "tasks", "backlog.md"))
 
+    def test_state_a_mano_que_menciona_la_marca_no_se_regenera(self):
+        project = self.new_project()
+        manual = "Estado: mío\nRecordatorio: los archivos con aw:auto los genera aw\n"
+        self.write(os.path.join(project, "state.md"), manual)
+        self.aw("task", "add", "algo", cwd=project)
+        self.assertEqual(self.read(project, "state.md"), manual)
+
     def test_no_escribe_fuera_de_un_proyecto(self):
         self.new_project()
         outside = self.aw("task", "add", "x", cwd=self.tmp)
@@ -1096,6 +1103,27 @@ class TestClaudeMdDelWorkspace(AwCase):
         self.awt("init")
         self.assertIn("Protocolo aw", slurp(self.path()))
 
+    def test_un_claude_md_ajeno_no_se_toca_ni_con_workspace(self):
+        self.awt("init")
+        own = "# CLAUDE.md\n\nInstrucciones propias de este repo\n"
+        self.write(self.path(), own)
+        for args in (("sync",), ("sync", "--workspace"), ("init",)):
+            out = self.awt(*args).stdout
+            self.assertIn("no es el del workspace aw", out, args)
+            self.assertEqual(slurp(self.path()), own, args)
+        self.assertEqual(self.backups(), [])
+        self.assertIn("aw no lo gestiona", self.awt("doctor").stdout)
+
+    def test_con_huella_sigue_siendo_del_workspace_aunque_cambie_la_primera_linea(self):
+        self.awt("init")
+        edited = slurp(self.path()).replace("# Protocolo aw (workspace)", "# Mi protocolo", 1)
+        self.write(self.path(), edited)
+        out = self.awt("sync").stdout
+        self.assertIn("difiere de la plantilla", out)
+        self.assertNotIn("no es el del workspace aw", out)
+        self.assertEqual(slurp(self.path()), edited)
+        self.assertIn("plantilla nueva aplicada", self.awt("sync", "--workspace").stdout)
+
     def test_el_doctor_avisa_si_esta_desactualizada(self):
         self.awt("init")
         self.awt("project", "new", "x")
@@ -1358,6 +1386,21 @@ class TestFunciones(AwCase):
         merged_again, notes_again = self.aw_mod.merge_settings(merged, template)
         self.assertEqual(notes_again, [])
         self.assertEqual(merged_again, merged)
+
+    def test_state_is_auto_exige_la_linea_exacta_de_la_marca(self):
+        auto, mark = self.aw_mod.state_is_auto, self.aw_mod.MARK_AUTO
+        for text in ("", "  \n", "Estado: iniciado\n", f"Estado: x\n{mark}\n", f"Estado: x\r\n  {mark}  \r\n"):
+            self.assertTrue(auto(text), repr(text))
+        for text in ("Estado: a mano\n", "Estado: x\nver aw:auto\n", "<!-- aw:auto -->\n", f"Estado: x\n{mark} extra\n"):
+            self.assertFalse(auto(text), repr(text))
+
+    def test_build_digest_conserva_las_lineas_de_un_estado_manual(self):
+        project = self.new_project()
+        state = os.path.join(project, "state.md")
+        self.write(state, "Estado: mío\nnota sobre aw:auto\n")
+        self.assertIn("nota sobre aw:auto", self.aw_mod.build_digest(project))
+        self.write(state, self.aw_mod.build_state(project))
+        self.assertNotIn(self.aw_mod.MARK_AUTO, self.aw_mod.build_digest(project))
 
     def test_merge_settings_no_toma_un_hook_ajeno_por_uno_de_aw(self):
         existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "otra-tool hook stop"}]}]}}

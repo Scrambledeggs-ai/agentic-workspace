@@ -220,9 +220,14 @@ def backup_file(path):
     return dest
 
 
+def first_line(text):
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
 def ensure_workspace_claude_md(dry_run=False, force=False):
     # Devuelve (acción, detalle). Acción: None (al día o sin plantilla), "crear", "marcar",
-    # "actualizar" o "difiere" (tiene cambios propios o es una versión anterior sin huella).
+    # "actualizar", "difiere" (tiene cambios propios o es una versión anterior sin huella) o
+    # "ajeno" (no es el del workspace aw: sin huella y con otra primera línea; no se toca nunca).
     body = workspace_template_body()
     if body is None:
         return None, ""
@@ -234,6 +239,8 @@ def ensure_workspace_claude_md(dry_run=False, force=False):
             write_text(path, desired)
         return "crear", "se crearía" if dry_run else "creado"
     current_body, digest = split_marker(current)
+    if digest is None and first_line(current) != first_line(body):
+        return "ajeno", ""
     if current_body == body:
         if digest is None:
             if not dry_run:
@@ -301,6 +308,8 @@ def action_init():
         print(f"CLAUDE.md del workspace: {detail}.")
     elif action == "difiere":
         print("CLAUDE.md del workspace: difiere de la plantilla. Usa 'aw sync --workspace' para actualizarlo (se respalda antes).")
+    elif action == "ajeno":
+        print("CLAUDE.md de la raíz: no es el del workspace aw (sin huella y con otra primera línea); no se gestiona.")
 
 
 # -- Registro dinámico de agentes / skills / tools --
@@ -751,7 +760,7 @@ def decision_titles(project):
 
 def state_is_auto(text):
     stripped = text.strip()
-    return (not stripped) or "aw:auto" in text or stripped == "Estado: iniciado"
+    return (not stripped) or stripped == "Estado: iniciado" or any(line.strip() == MARK_AUTO for line in text.splitlines())
 
 
 def log_entries(project):
@@ -932,7 +941,7 @@ def session_events(session_id):
 
 
 def build_digest(project, max_lines=45, max_chars=4000):
-    state_lines = [line for line in read_text(pj(project, "state.md")).splitlines() if "aw:auto" not in line]
+    state_lines = [line for line in read_text(pj(project, "state.md")).splitlines() if line.strip() != MARK_AUTO]
     lines = [f"[aw] Proyecto {os.path.basename(project)}: contexto cargado al iniciar la sesión (protocolo en el CLAUDE.md del workspace)."]
     lines += state_lines
     recent = log_entries(project)[-10:]
@@ -1253,6 +1262,9 @@ def sync_projects(names=None, dry_run=False, workspace=False):
     elif action == "difiere":
         print("- workspace: el CLAUDE.md difiere de la plantilla (cambios tuyos o versión anterior). "
               "Usa 'aw sync --workspace' para actualizarlo; se respalda antes.")
+    elif action == "ajeno":
+        print("- workspace: el CLAUDE.md de la raíz no es el del workspace aw (sin huella y con otra primera línea): "
+              "no se gestiona, tampoco con --workspace.")
     settings_text = repo_settings_text()
     if settings_text.strip():
         for change, rel in sync_settings(template, settings_text, project_vars("template_project", ""), dry_run):
@@ -1414,6 +1426,8 @@ def doctor(names=None):
     action, _detail = ensure_workspace_claude_md(dry_run=True)
     if action in ("actualizar", "difiere"):
         global_checks.append(("warn", "el CLAUDE.md del workspace difiere de la plantilla (aw sync --workspace)"))
+    elif action == "ajeno":
+        global_checks.append(("warn", "el CLAUDE.md de la raíz no es el del workspace aw: aw no lo gestiona"))
     try:
         indexed = set(json.loads(read_text(os.path.join(ROOT, "memory", "context_index.json")) or "{}").get("proyectos") or {})
     except (ValueError, AttributeError):
