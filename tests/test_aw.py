@@ -816,6 +816,16 @@ class TestSync(AwCase):
         self.assertTrue(any("generate.py" in c and c.endswith(" hook stop") for c in stop[1:]))
         self.assertIn("al día", self.aw("sync").stdout)
 
+    def test_sync_avisa_si_el_proyecto_es_un_repo_git_con_archivos_de_aw_sin_ignorar(self):
+        self.legacy_project("a")
+        b = self.legacy_project("b")
+        self.git(b, "init", "-q")
+        out = self.aw("sync").stdout
+        self.assertIn("`aw doctor b` explica cómo ignorarlos", out)
+        self.assertNotIn("aw doctor a", out)  # sin repo git no hay aviso
+        again = self.aw("sync").stdout
+        self.assertNotIn("aviso", again)  # sin cambios tampoco se repite
+
     def test_sync_no_duplica_hooks_ya_instalados(self):
         project = self.new_project()
         path = os.path.join(project, ".claude", "settings.json")
@@ -978,6 +988,61 @@ class TestDoctor(AwCase):
             self.assertEqual(result.returncode, 2, name)
             self.assertIn("Nombre de proyecto inválido", result.stderr)
             self.assertNotIn("Proyecto", result.stdout)
+
+    def apply_exclude_suggestions(self, output, exclude_file):
+        """Pega en info/exclude las líneas que sugiere doctor (las que empiezan con /)."""
+        patterns = [l.strip() for l in output.splitlines() if re.fullmatch(r"\s*/\S+", l)]
+        self.assertTrue(patterns, output)
+        os.makedirs(os.path.dirname(exclude_file), exist_ok=True)
+        with open(exclude_file, "a", encoding="utf-8") as f:
+            f.write("\n".join(patterns) + "\n")
+        return patterns
+
+    def test_doctor_no_dice_nada_de_git_si_no_es_un_repo(self):
+        self.new_project("uno")
+        out = self.aw("doctor", "uno").stdout
+        self.assertNotIn("ignorados por git", out)
+        self.assertNotIn("versionados en git", out)
+
+    def test_doctor_avisa_de_archivos_de_aw_sin_ignorar_y_la_sugerencia_funciona(self):
+        project = self.new_project("uno")
+        self.git(project, "init", "-q")
+        self.write(os.path.join(project, ".claude", "settings.json.bak-20200101-000000"), "{}")
+        out = self.aw("doctor", "uno").stdout
+        self.assertIn("no están ignorados por git", out)
+        self.assertIn("rutas absolutas", out)
+        patterns = self.apply_exclude_suggestions(out, os.path.join(project, ".git", "info", "exclude"))
+        self.assertIn("/state.md", patterns)
+        self.assertIn("/.claude/settings.json.bak-*", patterns)
+        after = self.aw("doctor", "uno").stdout
+        self.assertNotIn("no están ignorados por git", after)
+        self.assertIn("✓ archivos de aw ignorados por git", after)
+
+    def test_doctor_con_el_proyecto_anidado_en_un_repo_padre(self):
+        self.new_project("uno")
+        self.git(self.ws, "init", "-q")
+        out = self.aw("doctor", "uno").stdout
+        self.assertIn("/projects/uno/state.md", out)
+        self.apply_exclude_suggestions(out, os.path.join(self.ws, ".git", "info", "exclude"))
+        self.assertIn("✓ archivos de aw ignorados por git", self.aw("doctor", "uno").stdout)
+
+    def test_doctor_avisa_de_archivos_de_aw_ya_versionados(self):
+        project = self.new_project("uno")
+        self.git(project, "init", "-q")
+        self.git(project, "add", "-f", ".claude/settings.json")
+        out = self.aw("doctor", "uno").stdout
+        self.assertIn("ya están versionados en git: .claude/settings.json", out)
+        self.assertIn("git rm --cached", out)
+
+    def test_doctor_sin_git_en_el_path_no_falla(self):
+        project = self.new_project("uno")
+        self.git(project, "init", "-q")
+        env = dict(self.env, PATH=os.path.join(self.tmp, "vacio"))
+        result = subprocess.run([sys.executable, SCRIPT, "doctor", "uno"], cwd=self.tmp, env=env,
+                                capture_output=True, text=True)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("ignorados por git", result.stdout)
+        self.assertIn("Proyecto uno", result.stdout)
 
 
 class TestIndiceDelWorkspace(AwCase):

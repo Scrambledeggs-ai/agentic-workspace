@@ -115,8 +115,8 @@ Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea d
 | `aw decide "título" --why "motivo" [--alt "alternativas"]` | Registra una decisión; sin motivo no se registra |
 | `aw log "texto"` | Agrega una nota al registro de ejecución |
 | `aw state` | Regenera y muestra `state.md` |
-| `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes) |
-| `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos y referencias a agentes, skills y herramientas |
+| `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes). Si un proyecto es un repo git y `sync` le añadió archivos de aw sin ignorar, lo avisa |
+| `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos, referencias a agentes, skills y herramientas, y, si el proyecto está en un repo git, qué archivos de aw no están ignorados (un `git add .` los incluiría) o ya están versionados, con las líneas para ignorarlos solo en local (`.git/info/exclude`) |
 
 Los comandos de tareas, decisiones y notas actúan sobre el proyecto de la carpeta actual (o el indicado con `--project`) y solo escriben dentro de él.
 
