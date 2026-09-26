@@ -89,7 +89,7 @@ AUTO_END = "<!-- aw:auto:fin -->"
 PRIO_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 TASK_RE = re.compile(r"^- \[( |x)\] (T-\d+) \[(P[0-3])\] (.*)$")
 DATE_SUFFIX_RE = re.compile(r"(\s*\((?:creada|iniciada|hecha) \d{4}-\d{2}-\d{2}\))+\s*$")
-GIT_COMMIT_RE = re.compile(r"(^|[;&|]\s*)git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(\s|$)")
+GIT_COMMIT_RE = re.compile(r"(^|[;&|(\n]\s*)git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(\s|$)")
 
 HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
 
@@ -403,7 +403,8 @@ def render_tree(root_dir, variables):
 
 def create_project(name, description=""):
     name = (name or "").strip()
-    if not name or os.sep in name or name.startswith(".") or name == "template_project":
+    check_project_name(name)
+    if name == "template_project":
         raise AwError("Nombre de proyecto inválido.")
     template = os.path.join(ROOT, "projects", "template_project")
     if not os.path.isdir(template):
@@ -419,7 +420,7 @@ def create_project(name, description=""):
     refresh_state(target)
     try:
         refresh_workspace_index()
-    except OSError:
+    except (OSError, AwError):  # el índice es secundario: el proyecto ya está creado
         pass
     return target
 
@@ -505,7 +506,8 @@ def find_project(start=None):
 
 
 def check_project_name(name):
-    if not name or os.sep in name or name.startswith("."):
+    # Se rechazan ambos separadores en cualquier sistema: en Windows "/" también separa rutas.
+    if not name or "/" in name or "\\" in name or name.startswith("."):
         raise AwError("Nombre de proyecto inválido.")
 
 
@@ -923,6 +925,27 @@ def session_key(payload, project):
     return payload.get("session_id") or "sin-sesion-" + hashlib.sha1(project.encode("utf-8")).hexdigest()[:8]
 
 
+def session_write(path, text):
+    # Los temporales de sesión viven en un directorio compartido (/tmp): se crean sin seguir enlaces simbólicos
+    # (O_EXCL y O_NOFOLLOW) y solo legibles por su dueño (0600).
+    tmp = f"{path}.{os.getpid()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(tmp, flags, 0o600)
+    except FileExistsError:  # sobra de un proceso anterior con el mismo PID, o un enlace plantado: se quita el enlace, no su destino
+        os.unlink(tmp)
+        fd = os.open(tmp, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def session_append(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(text)
+
+
 def watched_hashes(project):
     hashes = {}
     for rel in ("tasks/backlog.md", "tasks/active.md", "tasks/done.md", "execution/decisions.md"):
@@ -958,7 +981,7 @@ def hook_session_start(payload, project):
     # Solo al reanudar o compactar se conserva el estado de la sesión; en cualquier otro caso es una sesión nueva
     # y se descarta lo que haya dejado una anterior que terminó sin SessionEnd.
     if not (payload.get("source") in ("resume", "compact") and load_session(key)):
-        write_text(session_path(key, "json"), json.dumps({"hashes": watched_hashes(project), "reminded": False, "inicio": now_str()}))
+        session_write(session_path(key, "json"), json.dumps({"hashes": watched_hashes(project), "reminded": False, "inicio": now_str()}))
         try:
             os.remove(session_path(key, "events"))
         except OSError:
@@ -980,12 +1003,12 @@ def git_last_commit(cwd):
 def hook_post_tool(payload, project):
     tool = str(payload.get("tool_name") or "?")
     events = session_path(session_key(payload, project), "events")
-    append_text(events, f"T {tool}\n")
+    session_append(events, f"T {tool}\n")
     if tool == "Bash":
         command = str((payload.get("tool_input") or {}).get("command") or "")
         if GIT_COMMIT_RE.search(command):
             log_event(project, "commit", git_last_commit(payload.get("cwd") or project) or "(sin detalle)")
-            append_text(events, "C\n")
+            session_append(events, "C\n")
 
 
 def hook_tool_failure(payload, project):
@@ -999,7 +1022,7 @@ def hook_tool_failure(payload, project):
         first = f"{first} — {lines[1]}"  # Claude Code pone el código de salida en la primera línea
     # Solo herramienta y primera línea del error: nunca el comando completo.
     append_text(pj(project, "execution", "errors.md"), f"- {now_str()} [{tool}] {redact(first)[:160]}\n")
-    append_text(session_path(session_key(payload, project), "events"), "E\n")
+    session_append(session_path(session_key(payload, project), "events"), "E\n")
 
 
 def hook_pre_compact(payload, project):
@@ -1016,7 +1039,7 @@ def hook_stop(payload, project):
     commits = sum(1 for line in session_events(session_id) if line == "C")
     if commits and watched_hashes(project) == session.get("hashes"):
         session["reminded"] = True
-        write_text(session_path(session_id, "json"), json.dumps(session))
+        session_write(session_path(session_id, "json"), json.dumps(session))
         message = (f"aw: hubo {commits} commit(s) en esta sesión y no se registró ninguna decisión ni movimiento de tareas. "
                    "Si corresponde, usa `aw decide` o `aw task`.")
         print(json.dumps({"systemMessage": message}, ensure_ascii=False))
@@ -1213,8 +1236,7 @@ def sync_settings(project, source_text, variables, dry_run):
     if not notes:
         return []
     if not dry_run:
-        backup = f"{dest}.bak-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        shutil.copy2(dest, backup)
+        backup_file(dest)
         write_text(dest, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
     return [("actualizar", ".claude/settings.json: " + "; ".join(notes))]
 
@@ -1300,6 +1322,10 @@ def sync_projects(names=None, dry_run=False, workspace=False):
 
 
 # -- Diagnóstico --
+
+def check(condition, ok_text, warn_text):
+    return ("ok", ok_text) if condition else ("warn", warn_text)
+
 
 def markdown_rows(text):
     rows = []
@@ -1474,7 +1500,7 @@ def doctor_project(project):
     for level, text in doctor_git(project):
         add(level, text)
 
-    add("ok" if os.path.exists(pj(project, "CLAUDE.md")) else "warn", "CLAUDE.md del proyecto presente" if os.path.exists(pj(project, "CLAUDE.md")) else "falta el CLAUDE.md del proyecto (aw sync lo crea)")
+    add(*check(os.path.exists(pj(project, "CLAUDE.md")), "CLAUDE.md del proyecto presente", "falta el CLAUDE.md del proyecto (aw sync lo crea)"))
 
     for folder, label in (("agents", "agentes"), ("skills", "skills")):
         notes = pj(project, folder, f"assigned_{folder}.md")
@@ -1507,8 +1533,8 @@ def doctor(names=None):
     counts = {"ok": 0, "warn": 0, "bad": 0}
     print("aw doctor")
     global_checks = [
-        ("ok" if shutil.which(WRAPPER_NAME) else "warn", "comando 'aw' en el PATH" if shutil.which(WRAPPER_NAME) else "el comando 'aw' no está en el PATH (opción 9 del menú)"),
-        ("ok" if os.path.exists(os.path.join(ROOT, "CLAUDE.md")) else "warn", "CLAUDE.md del workspace presente" if os.path.exists(os.path.join(ROOT, "CLAUDE.md")) else "falta el CLAUDE.md del workspace (aw init lo crea)"),
+        check(shutil.which(WRAPPER_NAME), "comando 'aw' en el PATH", "el comando 'aw' no está en el PATH (opción 9 del menú)"),
+        check(os.path.exists(os.path.join(ROOT, "CLAUDE.md")), "CLAUDE.md del workspace presente", "falta el CLAUDE.md del workspace (aw init lo crea)"),
     ]
     action, _detail = ensure_workspace_claude_md(dry_run=True)
     if action in ("actualizar", "difiere"):

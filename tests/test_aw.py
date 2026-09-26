@@ -10,6 +10,7 @@ import os
 import py_compile
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -232,7 +233,7 @@ class TestEstructura(AwCase):
 
     def test_nombres_invalidos(self):
         self.init()
-        for bad in ("../fuera", "template_project", ".oculto"):
+        for bad in ("../fuera", "template_project", ".oculto", "a\\b", "foo/../../evil"):
             result = self.aw("project", "new", bad)
             self.assertEqual(result.returncode, 2, bad)
         self.assertEqual(self.aw("project", "new", "a").returncode, 0)
@@ -612,6 +613,19 @@ class TestHooks(AwCase):
         self.hook("session-end", {"cwd": a}, a)
         self.assertIn("terminada: 0 commit(s), 1 usos de herramientas", self.read(a, "execution", "run_log.md"))
         self.assertEqual(os.listdir(self.sessions), [])
+
+    def test_los_temporales_de_sesion_no_siguen_enlaces_simbolicos_y_son_privados(self):
+        project = self.new_project()
+        victim = os.path.join(self.tmp, "victima.txt")
+        self.write(victim, "intacto\n")
+        events = os.path.join(self.sessions, "aw-s1.events")
+        os.symlink(victim, events)  # enlace plantado en el nombre exacto del temporal
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={}), project)
+        self.assertEqual(slurp(victim), "intacto\n")
+        self.assertIn("hook post-tool", self.read(self.ws, "logs", "debug.md"))
+        os.remove(events)
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={}), project)
+        self.assertEqual(stat.S_IMODE(os.stat(events).st_mode), 0o600)
 
     def test_stop_sin_commits_es_silencioso_y_actualiza_estado(self):
         project = self.new_project()
@@ -1374,6 +1388,19 @@ class TestBloqueoYAtomicidad(AwCase):
             self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(sorted(self.ids(project, "backlog.md")), [f"T-{i:03d}" for i in range(1, 9)])
 
+    def test_create_project_no_falla_si_el_indice_del_workspace_esta_bloqueado(self):
+        self.init()
+        holder = subprocess.Popen([sys.executable, "-c", HOLD_LOCK, self.ws], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.kill)
+        self.addCleanup(holder.stdout.close)
+        self.assertEqual(holder.stdout.readline().strip(), "listo")
+        self.aw_mod.LOCK_TIMEOUT = 0.3
+        target = self.aw_mod.create_project("uno")  # el índice es secundario: el proyecto se crea igualmente
+        self.assertTrue(os.path.isdir(target))
+        holder.stdin.close()
+        holder.wait(timeout=10)
+
     def test_project_lock_es_reentrante(self):
         project = self.new_project()
         self.aw_mod.LOCK_TIMEOUT = 0.3  # si no fuera reentrante, fallaría en 0,3 s en vez de colgarse
@@ -1465,9 +1492,11 @@ class TestFunciones(AwCase):
     def test_git_commit_regex(self):
         rx = self.aw_mod.GIT_COMMIT_RE
         for yes in ("git commit -m x", "git commit", "cd a && git commit -m y", "git -c user.name=a commit -m y",
-                    "git --no-pager commit", "npm test; git commit -am z"):
+                    "git --no-pager commit", "npm test; git commit -am z",
+                    "git add -A\ngit commit -m x", "cd a\n  git commit -m y", "(git commit -m x)", "echo $(git commit -m x)"):
             self.assertTrue(rx.search(yes), yes)
-        for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls"):
+        for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls",
+                   "echo hola\ngit log --grep commit"):
             self.assertFalse(rx.search(no), no)
 
     def test_merge_settings_no_modifica_el_original(self):
@@ -1481,6 +1510,22 @@ class TestFunciones(AwCase):
         merged_again, notes_again = self.aw_mod.merge_settings(merged, template)
         self.assertEqual(notes_again, [])
         self.assertEqual(merged_again, merged)
+
+    def test_session_write_no_escribe_a_traves_de_un_enlace_plantado_en_el_temporal(self):
+        victim = os.path.join(self.tmp, "victima.txt")
+        self.write(victim, "intacto\n")
+        target = os.path.join(self.tmp, "aw-x.json")
+        os.symlink(victim, f"{target}.{os.getpid()}.tmp")
+        self.aw_mod.session_write(target, "{}")
+        self.assertEqual(slurp(victim), "intacto\n")
+        self.assertEqual(slurp(target), "{}")
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o600)
+
+    def test_check_project_name_rechaza_ambos_separadores(self):
+        for bad in ("a/b", "a\\b", "foo/../../evil", "..\\x", ".oculto", ""):
+            with self.assertRaises(self.aw_mod.AwError, msg=repr(bad)):
+                self.aw_mod.check_project_name(bad)
+        self.aw_mod.check_project_name("mi-proyecto_2")
 
     def test_state_is_auto_exige_la_linea_exacta_de_la_marca(self):
         auto, mark = self.aw_mod.state_is_auto, self.aw_mod.MARK_AUTO
