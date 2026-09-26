@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1143,6 +1144,138 @@ class TestSettingsDesdeLaPlantilla(AwCase):
         out = self.aw("doctor", "nuevo").stdout
         self.assertNotIn("faltan", out)
         self.assertNotIn("✕", out)
+
+
+class Corte(Exception):
+    """Simula que el proceso se corta a mitad de una operación."""
+
+
+HOLD_LOCK = ("import fcntl, os, sys\n"
+             "fd = os.open(sys.argv[1], os.O_RDONLY)\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "print('listo', flush=True)\n"
+             "sys.stdin.read()\n")
+
+
+class TestBloqueoYAtomicidad(AwCase):
+    def setUp(self):
+        super().setUp()
+        self.aw_mod = load_aw(self.ws)
+
+    def ids(self, project, name):
+        return [t["id"] for t in self.aw_mod.load_tasks(project, name)]
+
+    def cut_on_write(self, nth):
+        """Hace que la escritura número nth de write_text falle. Devuelve la función que restaura el original."""
+        mod, original, calls = self.aw_mod, self.aw_mod.write_text, []
+
+        def fake(path, text):
+            calls.append(path)
+            if len(calls) == nth:
+                raise Corte()
+            original(path, text)
+
+        mod.write_text = fake
+        restore = lambda: setattr(mod, "write_text", original)
+        self.addCleanup(restore)
+        return restore
+
+    def test_task_start_no_pierde_la_tarea_si_se_corta_a_mitad(self):
+        project = self.new_project()
+        self.aw_mod.task_add(project, "hacer algo", "P1")
+        self.cut_on_write(2)
+        with self.assertRaises(Corte):
+            self.aw_mod.task_start(project, "T-001")
+        self.assertIn("T-001", self.ids(project, "backlog.md") + self.ids(project, "active.md"))
+
+    def test_task_start_reintentado_tras_un_corte_completa_el_movimiento(self):
+        project = self.new_project()
+        self.aw_mod.task_add(project, "hacer algo", "P1")
+        restore = self.cut_on_write(2)
+        with self.assertRaises(Corte):
+            self.aw_mod.task_start(project, "T-001")
+        restore()
+        self.aw_mod.task_start(project, "T-001")
+        self.assertEqual(self.ids(project, "backlog.md"), [])
+        self.assertEqual(self.ids(project, "active.md"), ["T-001"])
+        with self.assertRaises(self.aw_mod.AwError):  # sin copia pendiente sigue siendo un error
+            self.aw_mod.task_start(project, "T-001")
+
+    def test_task_done_no_pierde_la_tarea_si_se_corta_al_guardar(self):
+        project = self.new_project()
+        self.aw_mod.task_add(project, "hacer algo")
+        self.aw_mod.task_start(project, "T-001")
+
+        def fail(path, text):
+            raise Corte()
+
+        original = self.aw_mod.append_text
+        self.aw_mod.append_text = fail
+        self.addCleanup(setattr, self.aw_mod, "append_text", original)
+        with self.assertRaises(Corte):
+            self.aw_mod.task_done(project, "T-001")
+        self.assertIn("T-001", self.ids(project, "active.md") + self.ids(project, "done.md"))
+
+    def test_task_done_reintentado_tras_un_corte_no_duplica(self):
+        project = self.new_project()
+        self.aw_mod.task_add(project, "hacer algo")
+        self.aw_mod.task_start(project, "T-001")
+        restore = self.cut_on_write(1)
+        with self.assertRaises(Corte):
+            self.aw_mod.task_done(project, "T-001")
+        restore()
+        self.assertEqual(self.ids(project, "done.md"), ["T-001"])
+        self.assertEqual(self.ids(project, "active.md"), ["T-001"])  # duplicada por el corte, no perdida
+        self.aw_mod.task_done(project, "T-001")
+        self.assertEqual(self.ids(project, "done.md"), ["T-001"])
+        self.assertEqual(self.ids(project, "active.md"), [])
+
+    def test_task_add_espera_si_el_proyecto_esta_bloqueado(self):
+        project = self.new_project()
+        with self.aw_mod.project_lock(project):
+            proc = subprocess.Popen([sys.executable, SCRIPT, "task", "add", "espera"], cwd=project, env=self.env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.addCleanup(proc.kill)
+            time.sleep(0.7)
+            self.assertIsNone(proc.poll(), "task add no debe terminar mientras el proyecto está bloqueado")
+        _out, err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertIn("espera", self.read(project, "tasks", "backlog.md"))
+
+    def test_task_add_en_paralelo_no_repite_identificadores(self):
+        project = self.new_project()
+        procs = [subprocess.Popen([sys.executable, SCRIPT, "task", "add", f"tarea {i}"], cwd=project, env=self.env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(8)]
+        for proc in procs:
+            _out, err = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(sorted(self.ids(project, "backlog.md")), [f"T-{i:03d}" for i in range(1, 9)])
+
+    def test_project_lock_es_reentrante(self):
+        project = self.new_project()
+        self.aw_mod.LOCK_TIMEOUT = 0.3  # si no fuera reentrante, fallaría en 0,3 s en vez de colgarse
+        with self.aw_mod.project_lock(project):
+            self.aw_mod.task_add(project, "dentro del bloqueo")
+            self.aw_mod.decide(project, "algo", "porque")
+            with self.aw_mod.project_lock(project):
+                pass
+        self.assertEqual(self.ids(project, "backlog.md"), ["T-001"])
+
+    def test_project_lock_da_error_si_otro_proceso_lo_retiene(self):
+        project = self.new_project()
+        holder = subprocess.Popen([sys.executable, "-c", HOLD_LOCK, project], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.kill)
+        self.addCleanup(holder.stdout.close)
+        self.assertEqual(holder.stdout.readline().strip(), "listo")
+        self.aw_mod.LOCK_TIMEOUT = 0.3
+        with self.assertRaises(self.aw_mod.AwError):
+            with self.aw_mod.project_lock(project):
+                pass
+        holder.stdin.close()
+        holder.wait(timeout=10)
+        with self.aw_mod.project_lock(project):  # al liberarse el otro proceso ya se puede
+            pass
 
 
 class TestFunciones(AwCase):

@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
@@ -9,6 +10,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
+
+try:
+    import fcntl
+except ImportError:  # Windows: sin bloqueo entre procesos (el instalador tampoco lo soporta todavía)
+    fcntl = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STRUCTURE_FILE = os.path.join(HERE, "structure.json")
@@ -511,6 +518,43 @@ def pj(project, *parts):
     return os.path.join(project, *parts)
 
 
+LOCK_TIMEOUT = 5
+HELD_LOCKS = set()
+
+
+@contextlib.contextmanager
+def project_lock(project):
+    # Bloqueo por proyecto entre procesos (flock sobre la carpeta, sin archivos) y reentrante dentro del proceso.
+    key = os.path.abspath(project)
+    if fcntl is None or key in HELD_LOCKS:
+        yield
+        return
+    try:
+        fd = os.open(key, os.O_RDONLY)
+    except OSError:
+        yield
+        return
+    try:
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise AwError("El proyecto está ocupado por otro proceso de aw. Inténtalo de nuevo.")
+                time.sleep(0.02)
+            except OSError:  # el sistema de archivos no admite flock: se sigue sin bloqueo
+                break
+        HELD_LOCKS.add(key)
+        try:
+            yield
+        finally:
+            HELD_LOCKS.discard(key)
+    finally:
+        os.close(fd)
+
+
 def clean_title(title):
     return DATE_SUFFIX_RE.sub("", title).strip()
 
@@ -556,8 +600,9 @@ def rotate_log(path, limit=400, keep=300):
 def log_event(project, kind, text):
     line = f"- {now_str()} [{kind}] {' '.join(str(text).split())}"
     path = pj(project, "execution", "run_log.md")
-    append_text(path, line + "\n")
-    rotate_log(path)
+    with project_lock(project):
+        append_text(path, line + "\n")
+        rotate_log(path)
 
 
 # -- Tareas --
@@ -623,48 +668,61 @@ def task_add(project, title, prio="P2"):
     prio = (prio or "P2").upper()
     if prio not in PRIO_ORDER:
         raise AwError("La prioridad debe ser P0, P1, P2 o P3.")
-    task_id = next_task_id(project)
     path = pj(project, "tasks", "backlog.md")
-    line = f"- [ ] {task_id} [{prio}] {title} (creada {today()})"
-    write_text(path, insert_task_line(read_text(path), line, prio))
-    refresh_state(project)
+    with project_lock(project):
+        task_id = next_task_id(project)
+        line = f"- [ ] {task_id} [{prio}] {title} (creada {today()})"
+        write_text(path, insert_task_line(read_text(path), line, prio))
+        refresh_state(project)
     return task_id, prio
 
+
+# task_start y task_done escriben primero el destino y después quitan el origen: un corte a mitad
+# deja la tarea duplicada, nunca perdida, y repetir el comando termina el movimiento sin duplicar.
 
 def task_start(project, task_id):
     task_id = normalize_task_id(task_id)
     backlog_path = pj(project, "tasks", "backlog.md")
     active_path = pj(project, "tasks", "active.md")
-    if any(t["id"] == task_id for t in load_tasks(project, "active.md")):
-        raise AwError(f"{task_id} ya está en curso.")
-    new_backlog, task = take_task(read_text(backlog_path), task_id)
-    if task is None:
-        if any(t["id"] == task_id for t in load_tasks(project, "done.md")):
-            raise AwError(f"{task_id} ya está hecha.")
-        raise AwError(f"No existe {task_id} en los pendientes.")
-    write_text(backlog_path, new_backlog)
-    line = f"- [ ] {task_id} [{task['prio']}] {task['title']} (iniciada {today()})"
-    write_text(active_path, insert_task_line(read_text(active_path), line, task["prio"]))
-    refresh_state(project)
-    return task
+    with project_lock(project):
+        new_backlog, task = take_task(read_text(backlog_path), task_id)
+        if any(t["id"] == task_id for t in load_tasks(project, "active.md")):
+            if task is None:
+                raise AwError(f"{task_id} ya está en curso.")
+            write_text(backlog_path, new_backlog)  # copia que dejó un corte anterior
+            refresh_state(project)
+            return task
+        if task is None:
+            if any(t["id"] == task_id for t in load_tasks(project, "done.md")):
+                raise AwError(f"{task_id} ya está hecha.")
+            raise AwError(f"No existe {task_id} en los pendientes.")
+        line = f"- [ ] {task_id} [{task['prio']}] {task['title']} (iniciada {today()})"
+        write_text(active_path, insert_task_line(read_text(active_path), line, task["prio"]))
+        write_text(backlog_path, new_backlog)
+        refresh_state(project)
+        return task
 
 
 def task_done(project, task_id):
     task_id = normalize_task_id(task_id)
-    task = None
-    for name in ("active.md", "backlog.md"):
-        path = pj(project, "tasks", name)
-        new_text, task = take_task(read_text(path), task_id)
-        if task is not None:
-            write_text(path, new_text)
-            break
-    if task is None:
-        if any(t["id"] == task_id for t in load_tasks(project, "done.md")):
-            raise AwError(f"{task_id} ya está hecha.")
-        raise AwError(f"No existe {task_id}.")
-    append_text(pj(project, "tasks", "done.md"), f"- [x] {task_id} [{task['prio']}] {task['title']} (hecha {today()})\n")
-    refresh_state(project)
-    return task
+    with project_lock(project):
+        task = None
+        remaining = {}
+        for name in ("active.md", "backlog.md"):
+            path = pj(project, "tasks", name)
+            new_text, found = take_task(read_text(path), task_id)
+            if found is not None:
+                task = task or found
+                remaining[path] = new_text
+        already_done = any(t["id"] == task_id for t in load_tasks(project, "done.md"))
+        if task is None:
+            raise AwError(f"{task_id} ya está hecha." if already_done else f"No existe {task_id}.")
+        if not already_done:
+            append_text(pj(project, "tasks", "done.md"), f"- [x] {task_id} [{task['prio']}] {task['title']} (hecha {today()})\n")
+        for path, text in remaining.items():
+            write_text(path, text)
+        refresh_state(project)
+        return task
 
 
 # -- Decisiones --
@@ -679,9 +737,10 @@ def decide(project, title, why, alt=None):
     block = f"\n## {today()} — {title}\n- Motivo: {why}\n"
     if alt and alt.strip():
         block += f"- Alternativas: {' '.join(alt.split())}\n"
-    append_text(pj(project, "execution", "decisions.md"), block)
-    log_event(project, "decisión", title)
-    refresh_state(project)
+    with project_lock(project):
+        append_text(pj(project, "execution", "decisions.md"), block)
+        log_event(project, "decisión", title)
+        refresh_state(project)
 
 
 def decision_titles(project):
@@ -723,13 +782,14 @@ def build_state(project):
 def refresh_state(project):
     # Devuelve True si state.md es automático (y queda al día), False si tiene texto manual.
     path = pj(project, "state.md")
-    current = read_text(path)
-    if not state_is_auto(current):
-        return False
-    new = build_state(project)
-    if new != current:
-        write_text(path, new)
-    return True
+    with project_lock(project):
+        current = read_text(path)
+        if not state_is_auto(current):
+            return False
+        new = build_state(project)
+        if new != current:
+            write_text(path, new)
+        return True
 
 
 # -- Índices derivados --
