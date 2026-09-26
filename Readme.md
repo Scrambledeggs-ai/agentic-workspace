@@ -46,8 +46,10 @@ cd agentic-workspace
 
 ```text
 agentic-workspace/
-├── generate.py
-├── structure.json
+├── generate.py       menú, comandos, hooks, sync y diagnóstico (un solo archivo)
+├── structure.json    esquema de carpetas y archivos del workspace
+├── templates/        contenido inicial de los archivos del esquema
+├── tests/            pruebas (solo biblioteca estándar)
 ├── .gitignore
 └── README.md
 ```
@@ -84,6 +86,47 @@ Disponible por ahora solo en Linux/Mac. Si `~/.local/bin` no está en tu `PATH`,
 ## Descripción
 
 Este proyecto contiene un menú en Python para generar y manejar la estructura de un workspace de trabajo con agentes de IA, usando la configuración definida en `structure.json`.
+
+---
+
+## Que el sistema se escriba y se lea solo
+
+Cada proyecto creado con aw lleva su estado en archivos, y Claude Code los usa así:
+
+* **Al abrir una sesión**, un hook (`SessionStart`) carga un resumen: estado, tareas en curso y últimas líneas del registro.
+* **Mientras se trabaja**, otros hooks anotan solos los commits, los fallos de herramientas (sin comandos completos ni secretos), las compactaciones y el resumen de cada sesión.
+* **Lo que exige criterio** se registra con comandos de formato fijo (`aw task`, `aw decide`, `aw log`).
+* **El estado** (`state.md`) se genera solo a partir de las tareas y el registro. Si contiene texto escrito a mano, no se sobrescribe.
+* **`core/` y `memory/`** se crean con un formato base para completar a mano (configuración, arranque, enrutamiento, política de memoria, memoria global). Los que solo remiten a otra fuente lo dicen en vez de duplicar contenido. `aw doctor` cuenta los campos `(completar)` que faltan.
+* **El índice de proyectos** del workspace (`memory/projects/project_index.md` y `memory/context_index.json`) lo regenera aw al sincronizar y al cerrar cada sesión: proyecto, estado y última actividad.
+
+Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea desde `templates/`. Nunca bloquean ni interrumpen la sesión: si algo falla, lo anotan en `logs/debug.md`.
+
+### Comandos
+
+| Comando | Qué hace |
+|---|---|
+| `aw` | Abre el menú |
+| `aw init` | Crea o actualiza la estructura del workspace (nunca sobrescribe; solo rellena archivos vacíos) |
+| `aw project new NOMBRE --desc "texto"` | Crea un proyecto desde la plantilla |
+| `aw task add "título" --prio P1` | Agrega una tarea (P0 urgente, P1 alta, P2 normal, P3 baja) |
+| `aw task start T-001` / `aw task done T-001` | Pasa la tarea a en curso / hecha |
+| `aw task list [--all]` | Lista las tareas |
+| `aw decide "título" --why "motivo" [--alt "alternativas"]` | Registra una decisión; sin motivo no se registra |
+| `aw log "texto"` | Agrega una nota al registro de ejecución |
+| `aw state` | Regenera y muestra `state.md` |
+| `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes) |
+| `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos y referencias a agentes, skills y herramientas |
+
+Los comandos de tareas, decisiones y notas actúan sobre el proyecto de la carpeta actual (o el indicado con `--project`) y solo escriben dentro de él.
+
+### Pruebas
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Cada prueba usa un workspace temporal (`AW_HOME`), así que no toca el workspace real.
 
 ---
 

@@ -3,25 +3,26 @@ __pycache__/
 .DS_Store
 
 # Uso interno de desarrollo (no se suben)
-NEXT_STEPS.md
-CLAUDE.md
+/NEXT_STEPS.md
+/CLAUDE.md
+/.claude/
 
 # Generado por generate.py (raíz del workspace en un clon suelto)
-core/
-memory/
-agents/
-skills/
-tools/
-playground/
-projects/
-logs/
+/core/
+/memory/
+/agents/
+/skills/
+/tools/
+/playground/
+/projects/
+/logs/
 
 # Estructura del proyecto aw (trabajo local)
-artifacts/
-execution/
-sop/
-tasks/
-context_index.json
-memory.md
-project.md
-state.md
+/artifacts/
+/execution/
+/sop/
+/tasks/
+/context_index.json
+/memory.md
+/project.md
+/state.md

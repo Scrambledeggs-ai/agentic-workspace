@@ -1,5 +1,9 @@
 
 {
+  "files": [
+    "CLAUDE.md"
+  ],
+
   "core": {
     "files": [
       "init.md",
@@ -30,12 +34,19 @@
     "folders": {
       "template_project": {
         "files": [
+          "CLAUDE.md",
           "project.md",
           "state.md",
           "memory.md",
           "context_index.json"
         ],
         "folders": {
+          ".claude": {
+            "files": [
+              "settings.json"
+            ]
+          },
+
           "tasks": {
             "files": [
               "backlog.md",
@@ -59,10 +70,18 @@
             ]
           },
 
+          "skills": {
+            "files": [
+              "assigned_skills.md",
+              "skill_context.md"
+            ]
+          },
+
           "tools": {
             "files": [
               "tool_usage.md",
-              "tool_state.json"
+              "tool_state.json",
+              "assigned_tools.md"
             ]
           },
 
