@@ -577,6 +577,31 @@ class TestHooks(AwCase):
         self.hook("session-start", self.payload(project, source="compact"), project)
         self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
 
+    def test_session_start_de_una_sesion_nueva_descarta_lo_que_dejo_otra_sin_cierre(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "c1")
+        self.hook("session-start", {"cwd": project}, project)
+        self.hook("post-tool", {"cwd": project, "tool_name": "Bash", "tool_input": {"command": "git commit -m c1"}}, project)
+        # Esa sesión termina sin SessionEnd; llega una nueva, también sin session_id.
+        self.hook("session-start", {"cwd": project, "source": "startup"}, project)
+        self.assertEqual(self.hook("stop", {"cwd": project}, project).stdout, "")
+
+    def test_session_end_espera_si_el_workspace_esta_bloqueado(self):
+        project = self.new_project()
+        aw = load_aw(self.ws)
+        with aw.project_lock(self.ws):
+            proc = subprocess.Popen([sys.executable, SCRIPT, "hook", "session-end"], cwd=project, env=self.env,
+                                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+            self.addCleanup(proc.kill)
+            proc.stdin.write(json.dumps(self.payload(project)))
+            proc.stdin.close()
+            time.sleep(0.7)
+            self.assertIsNone(proc.poll(), "el cierre no debe tocar el registro mensual con el workspace bloqueado")
+        proc.wait(timeout=20)
+        self.assertIn("demo — terminada", self.read(self.ws, "logs", "current_month.md"))
+
     def test_hooks_sin_session_id_no_comparten_temporales_entre_proyectos(self):
         a = self.new_project("a")
         self.aw("project", "new", "b")
@@ -1110,9 +1135,14 @@ class TestClaudeMdDelWorkspace(AwCase):
         for args in (("sync",), ("sync", "--workspace"), ("init",)):
             out = self.awt(*args).stdout
             self.assertIn("no es el del workspace aw", out, args)
+            self.assertIn("aw init", out, args)  # dice cómo recuperarse si era una versión antigua
             self.assertEqual(slurp(self.path()), own, args)
         self.assertEqual(self.backups(), [])
         self.assertIn("aw no lo gestiona", self.awt("doctor").stdout)
+        os.rename(self.path(), self.path() + ".antiguo")  # lo que dicen los avisos: renombrarlo y ejecutar aw init
+        self.awt("init")
+        self.assertTrue(slurp(self.path()).startswith("# Protocolo aw (workspace)"))
+        self.assertEqual(slurp(self.path() + ".antiguo"), own)
 
     def test_con_huella_sigue_siendo_del_workspace_aunque_cambie_la_primera_linea(self):
         self.awt("init")

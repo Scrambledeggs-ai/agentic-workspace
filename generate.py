@@ -309,7 +309,8 @@ def action_init():
     elif action == "difiere":
         print("CLAUDE.md del workspace: difiere de la plantilla. Usa 'aw sync --workspace' para actualizarlo (se respalda antes).")
     elif action == "ajeno":
-        print("CLAUDE.md de la raíz: no es el del workspace aw (sin huella y con otra primera línea); no se gestiona.")
+        print("CLAUDE.md de la raíz: no es el del workspace aw (sin huella y con otra primera línea); no se gestiona. "
+              "Si es una versión antigua del workspace, renómbralo y ejecuta 'aw init'.")
 
 
 # -- Registro dinámico de agentes / skills / tools --
@@ -844,21 +845,22 @@ def project_summary(name):
 
 
 def refresh_workspace_index():
-    data = {name: project_summary(name) for name in list_projects()}
-    json_path = os.path.join(ROOT, "memory", "context_index.json")
-    try:
-        current = json.loads(read_text(json_path) or "{}")
-    except ValueError:
-        current = None  # JSON roto: no se toca
-    if isinstance(current, dict) and current.get("proyectos") != data:
-        payload = {"actualizado": now_str(), "proyectos": data}
-        write_text(json_path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-    rows = ["| Proyecto | Estado | Última actividad |", "|---|---|---|"]
-    for name, info in data.items():
-        rows.append(f"| {name} | {info['estado'].replace('|', '/')} | {info['ultima_actividad'] or '-'} |")
-    if not data:
-        rows.append("| (ninguno todavía) | | |")
-    replace_block(os.path.join(ROOT, "memory", "projects", "project_index.md"), "\n".join(rows), header=INDEX_HEADER)
+    with project_lock(ROOT):  # los índices del workspace los escriben varios proyectos a la vez
+        data = {name: project_summary(name) for name in list_projects()}
+        json_path = os.path.join(ROOT, "memory", "context_index.json")
+        try:
+            current = json.loads(read_text(json_path) or "{}")
+        except ValueError:
+            current = None  # JSON roto: no se toca
+        if isinstance(current, dict) and current.get("proyectos") != data:
+            payload = {"actualizado": now_str(), "proyectos": data}
+            write_text(json_path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+        rows = ["| Proyecto | Estado | Última actividad |", "|---|---|---|"]
+        for name, info in data.items():
+            rows.append(f"| {name} | {info['estado'].replace('|', '/')} | {info['ultima_actividad'] or '-'} |")
+        if not data:
+            rows.append("| (ninguno todavía) | | |")
+        replace_block(os.path.join(ROOT, "memory", "projects", "project_index.md"), "\n".join(rows), header=INDEX_HEADER)
 
 
 def refresh_artifact_indexes(project):
@@ -953,8 +955,14 @@ def build_digest(project, max_lines=45, max_chars=4000):
 
 def hook_session_start(payload, project):
     key = session_key(payload, project)
-    if not load_session(key):  # al reanudar o compactar la sesión ya existe: se conserva su estado
+    # Solo al reanudar o compactar se conserva el estado de la sesión; en cualquier otro caso es una sesión nueva
+    # y se descarta lo que haya dejado una anterior que terminó sin SessionEnd.
+    if not (payload.get("source") in ("resume", "compact") and load_session(key)):
         write_text(session_path(key, "json"), json.dumps({"hashes": watched_hashes(project), "reminded": False, "inicio": now_str()}))
+        try:
+            os.remove(session_path(key, "events"))
+        except OSError:
+            pass
     log_event(project, "sesión", f"iniciada ({payload.get('source') or 'startup'})")
     refresh_state(project)
     output = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": build_digest(project)}}
@@ -1018,19 +1026,20 @@ def append_month_log(project, text):
     logs = os.path.join(ROOT, "logs")
     path = os.path.join(logs, "current_month.md")
     month = today()[:7]
-    existing = read_text(path)
-    header = re.match(r"# Registro de (\d{4}-\d{2})", existing)
-    if header and header.group(1) != month:
-        dest = os.path.join(logs, f"{header.group(1)}.md")
-        if os.path.exists(dest):
-            append_text(dest, existing)
-            write_text(path, "")
-        else:
-            os.replace(path, dest)
-        existing = ""
-    if not existing.strip():
-        write_text(path, f"# Registro de {month}\n\n")
-    append_text(path, f"- {now_str()} {os.path.basename(project)} — {text}\n")
+    with project_lock(ROOT):  # el registro mensual es compartido por todos los proyectos
+        existing = read_text(path)
+        header = re.match(r"# Registro de (\d{4}-\d{2})", existing)
+        if header and header.group(1) != month:
+            dest = os.path.join(logs, f"{header.group(1)}.md")
+            if os.path.exists(dest):
+                append_text(dest, existing)
+                write_text(path, "")
+            else:
+                os.replace(path, dest)
+            existing = ""
+        if not existing.strip():
+            write_text(path, f"# Registro de {month}\n\n")
+        append_text(path, f"- {now_str()} {os.path.basename(project)} — {text}\n")
 
 
 def update_tool_usage(project, session_id, tools, commits):
@@ -1264,7 +1273,7 @@ def sync_projects(names=None, dry_run=False, workspace=False):
               "Usa 'aw sync --workspace' para actualizarlo; se respalda antes.")
     elif action == "ajeno":
         print("- workspace: el CLAUDE.md de la raíz no es el del workspace aw (sin huella y con otra primera línea): "
-              "no se gestiona, tampoco con --workspace.")
+              "no se gestiona, tampoco con --workspace. Si es una versión antigua del workspace, renómbralo y ejecuta 'aw init'.")
     settings_text = repo_settings_text()
     if settings_text.strip():
         for change, rel in sync_settings(template, settings_text, project_vars("template_project", ""), dry_run):
@@ -1427,7 +1436,8 @@ def doctor(names=None):
     if action in ("actualizar", "difiere"):
         global_checks.append(("warn", "el CLAUDE.md del workspace difiere de la plantilla (aw sync --workspace)"))
     elif action == "ajeno":
-        global_checks.append(("warn", "el CLAUDE.md de la raíz no es el del workspace aw: aw no lo gestiona"))
+        global_checks.append(("warn", "el CLAUDE.md de la raíz no es el del workspace aw: aw no lo gestiona "
+                                      "(si es una versión antigua, renómbralo y ejecuta aw init)"))
     try:
         indexed = set(json.loads(read_text(os.path.join(ROOT, "memory", "context_index.json")) or "{}").get("proyectos") or {})
     except (ValueError, AttributeError):
