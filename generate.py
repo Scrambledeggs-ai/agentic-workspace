@@ -1289,6 +1289,10 @@ def sync_projects(names=None, dry_run=False, workspace=False):
         print(f"- {name}: " + (f"{len(changes)} cambio(s)" if changes else "al día"))
         for change, rel in changes:
             print(f"    {change}: {rel}")
+        exposure = git_exposure(path) if changes and not dry_run else None
+        if exposure and exposure["expuestos"]:
+            print(f"    aviso: {len(exposure['expuestos'])} archivo(s) de aw no están ignorados por git; "
+                  f"`aw doctor {name}` explica cómo ignorarlos solo en local.")
     if not dry_run:
         refresh_workspace_index()
         print("- workspace: índice de proyectos al día")
@@ -1307,6 +1311,77 @@ def markdown_rows(text):
             continue
         rows.append(cells)
     return rows[1:]  # sin la fila de encabezado
+
+
+# Archivos de aw que conviene no versionar en el repo git de un proyecto: son estado generado o llevan rutas
+# absolutas de esta máquina. El contenido del usuario (tasks/, decisions.md, project.md...) no está aquí.
+AW_LOCAL_FILES = (".claude/settings.json", "state.md", "context_index.json", "execution/run_log.md",
+                  "execution/run_log_archivo.md", "execution/errors.md", "tools/tool_usage.md", "tools/tool_state.json")
+
+
+def run_git(project, *args):
+    try:
+        result = subprocess.run(["git", *args], cwd=project, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result if result.returncode in (0, 1) else None
+
+
+def git_exposure(project):
+    # None si el proyecto no está en un repo git (o no hay git). Si lo está, clasifica los archivos de aw que
+    # existen: "expuestos" (un `git add .` los incluiría) y "versionados". No escribe nada.
+    info = run_git(project, "rev-parse", "--is-inside-work-tree", "--show-prefix", "--git-path", "info/exclude")
+    lines = info.stdout.split("\n") if info else []
+    if len(lines) < 3 or lines[0] != "true":
+        return None
+    present = [f for f in AW_LOCAL_FILES if os.path.isfile(pj(project, *f.split("/")))]
+    claude_dir = pj(project, ".claude")
+    if os.path.isdir(claude_dir):
+        present += sorted(f".claude/{n}" for n in os.listdir(claude_dir) if n.startswith("settings.json.bak-"))
+    tracked_run = run_git(project, "ls-files", "--", *present) if present else None
+    tracked = set(tracked_run.stdout.split("\n")) if tracked_run else set()
+    untracked = [f for f in present if f not in tracked]
+    ignored_run = run_git(project, "check-ignore", "--", *untracked) if untracked else None
+    ignored = set(ignored_run.stdout.split("\n")) if ignored_run else set()
+    return {
+        "total": len(present),
+        "versionados": [f for f in present if f in tracked],
+        "expuestos": [f for f in untracked if f not in ignored],
+        "prefijo": lines[1],
+        "exclude": os.path.normpath(os.path.join(project, lines[2])),
+    }
+
+
+def exclude_patterns(exposure):
+    patterns = []
+    for f in exposure["expuestos"]:
+        pattern = "/" + exposure["prefijo"] + (".claude/settings.json.bak-*" if f.startswith(".claude/settings.json.bak-") else f)
+        if pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
+
+
+def doctor_git(project):
+    exposure = git_exposure(project)
+    if exposure is None or not exposure["total"]:
+        return []
+    exposed, tracked = exposure["expuestos"], exposure["versionados"]
+    results = []
+    if exposed:
+        text = f"{len(exposed)} archivo(s) de aw no están ignorados por git y un `git add .` los incluiría: {', '.join(exposed)}."
+        if any(f.startswith(".claude/settings.json") for f in exposed):
+            text += "\n.claude/settings.json lleva rutas absolutas de tu máquina; el resto es estado generado."
+        text += f"\nPara ignorarlos solo en local, añade estas líneas a {exposure['exclude']}:"
+        text += "".join(f"\n  {pattern}" for pattern in exclude_patterns(exposure))
+        text += "\ntasks/, decisions.md, project.md y el resto de tu contenido no están en la lista: versionarlos es decisión tuya."
+        results.append(("warn", text))
+    if tracked:
+        results.append(("warn", f"{len(tracked)} archivo(s) de aw ya están versionados en git: {', '.join(tracked)}. "
+                                f"Contienen rutas de tu máquina o son estado generado; para dejar de versionarlos usa "
+                                f"`git rm --cached <archivo>` y añádelos a {exposure['exclude']}."))
+    if not exposed and not tracked:
+        results.append(("ok", "archivos de aw ignorados por git"))
+    return results
 
 
 def doctor_project(project):
@@ -1396,6 +1471,9 @@ def doctor_project(project):
             need = [p for p in ("Bash(aw task *)", "Bash(aw decide *)", "Bash(aw log *)") if p not in allow]
             add("warn" if need else "ok", ("faltan permisos: " + ", ".join(need)) if need else "permisos de aw presentes")
 
+    for level, text in doctor_git(project):
+        add(level, text)
+
     add("ok" if os.path.exists(pj(project, "CLAUDE.md")) else "warn", "CLAUDE.md del proyecto presente" if os.path.exists(pj(project, "CLAUDE.md")) else "falta el CLAUDE.md del proyecto (aw sync lo crea)")
 
     for folder, label in (("agents", "agentes"), ("skills", "skills")):
@@ -1471,7 +1549,7 @@ def doctor(names=None):
             continue
         for level, text in doctor_project(path):
             counts[level] += 1
-            print(f"  {symbols[level]} {text}")
+            print(f"  {symbols[level]} " + text.replace("\n", "\n    "))
     print(f"\nResumen: {counts['ok']} bien, {counts['warn']} por revisar, {counts['bad']} pendientes")
     return 1 if counts["bad"] else 0
 
