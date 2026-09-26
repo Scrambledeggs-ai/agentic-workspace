@@ -487,10 +487,14 @@ def find_project(start=None):
         path = parent
 
 
+def check_project_name(name):
+    if not name or os.sep in name or name.startswith("."):
+        raise AwError("Nombre de proyecto inválido.")
+
+
 def resolve_project(name=None):
     if name:
-        if os.sep in name or name.startswith("."):
-            raise AwError("Nombre de proyecto inválido.")
+        check_project_name(name)
         path = os.path.join(ROOT, "projects", name)
         if not os.path.isdir(path):
             raise AwError(f"No existe el proyecto '{name}'.")
@@ -511,13 +515,26 @@ def clean_title(title):
     return DATE_SUFFIX_RE.sub("", title).strip()
 
 
+SENSITIVE_KEY = r"[\w.-]{0,64}(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key)[\w.-]{0,64}"
+LONG_STRING_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])")
+
+
+def mask_long_string(match):
+    value = match.group(0)
+    # Con "/" o "+" solo se oculta si parece base64 (mayúscula, minúscula y dígito): así las rutas largas se conservan.
+    if re.search(r"[/+]", value) and not all(re.search(p, value) for p in (r"[A-Z]", r"[a-z]", r"\d")):
+        return value
+    return "[oculto]"
+
+
 def redact(text):
-    text = re.sub(r"(?i)\b(authorization)\b\s*[:=]?\s*(?:(?:bearer|basic)\s+)?\S+", r"\1 [oculto]", text)
+    text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:(?:bearer|basic)\s+)?\S+)", r"\1 [oculto]", text)
     text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [oculto]", text)
-    text = re.sub(r"(?i)\b(token|secret|password|passwd|api[_-]?key)\b\s*[=:]\s*\S+", r"\1 [oculto]", text)
+    text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
+    text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
+    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)", r"\1 [oculto]", text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
-    text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "[oculto]", text)
-    return text
+    return LONG_STRING_RE.sub(mask_long_string, text)
 
 
 def rotate_log(path, limit=400, keep=300):
@@ -1116,6 +1133,8 @@ def sync_project(project, template, dry_run=False):
 
 
 def sync_projects(names=None, dry_run=False, workspace=False):
+    for name in names or []:
+        check_project_name(name)
     template = os.path.join(ROOT, "projects", "template_project")
     if not dry_run:
         build(ROOT, load_structure())
@@ -1281,6 +1300,8 @@ def doctor_project(project):
 
 
 def doctor(names=None):
+    for name in names or []:
+        check_project_name(name)
     symbols = {"ok": "✓", "warn": "▲", "bad": "✕"}
     counts = {"ok": 0, "warn": 0, "bad": 0}
     print("aw doctor")

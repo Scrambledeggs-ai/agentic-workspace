@@ -735,6 +735,17 @@ class TestSync(AwCase):
         self.assertNotIn("- b:", result.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.project("b"), "CLAUDE.md")))
 
+    def test_sync_rechaza_nombres_invalidos_sin_tocar_nada(self):
+        self.init()
+        shutil.rmtree(os.path.join(self.ws, "core"))
+        before = sorted(os.listdir(self.tmp))
+        for name in ("../..", "..", ".oculto", "a/b", ""):
+            result = self.aw("sync", name)
+            self.assertEqual(result.returncode, 2, name)
+            self.assertIn("Nombre de proyecto inválido", result.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "core")), "build() no debe correr con nombres inválidos")
+        self.assertEqual(sorted(os.listdir(self.tmp)), before)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")
@@ -838,6 +849,14 @@ class TestDoctor(AwCase):
         missing = self.aw("doctor", "nada")
         self.assertEqual(missing.returncode, 1)
         self.assertIn("✕ no existe", missing.stdout)
+
+    def test_doctor_rechaza_nombres_invalidos(self):
+        self.new_project("uno")
+        for name in ("../..", "..", ".oculto", "a/b", ""):
+            result = self.aw("doctor", name)
+            self.assertEqual(result.returncode, 2, name)
+            self.assertIn("Nombre de proyecto inválido", result.stderr)
+            self.assertNotIn("Proyecto", result.stdout)
 
 
 class TestIndiceDelWorkspace(AwCase):
@@ -1052,6 +1071,41 @@ class TestFunciones(AwCase):
         self.assertNotIn("A" * 40, r("clave " + "A" * 40))
         self.assertEqual(r("Could not resolve host"), "Could not resolve host")
         self.assertEqual(r("invalid token provided"), "invalid token provided")
+
+    def test_redact_claves_con_prefijo_sufijo_o_comillas(self):
+        r = self.aw_mod.redact
+        for text, secret in (("DB_PASSWORD=hunter2", "hunter2"),
+                             ("client_secret=abc987", "abc987"),
+                             ("GITHUB_TOKEN: zzz111", "zzz111"),
+                             ("AWS_ACCESS_KEY=k123", "k123"),
+                             ("private-key=pk777", "pk777"),
+                             ('{"password": "hunter two"}', "hunter two"),
+                             ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+                             ('-H "Authorization: Bearer abc123"', "abc123")):
+            self.assertNotIn(secret, r(text), text)
+
+    def test_redact_credenciales_en_urls_y_consultas(self):
+        r = self.aw_mod.redact
+        clone = r("git clone https://usuario:s3cr3t@github.com/a/b.git")
+        self.assertNotIn("s3cr3t", clone)
+        self.assertIn("github.com/a/b.git", clone)
+        query = r("GET /cb?code=1&access_token=abc999&page=2")
+        self.assertNotIn("abc999", query)
+        self.assertIn("page=2", query)
+        self.assertNotIn("k9k9k9", r("https://api.x.io/v1?key=k9k9k9"))
+        self.assertEqual(r("ssh://git@github.com/a/b.git"), "ssh://git@github.com/a/b.git")
+
+    def test_redact_base64_con_barras_y_rutas_largas(self):
+        r = self.aw_mod.redact
+        key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        self.assertNotIn("K7MDENG", r("clave " + key))
+        ruta = "/home/usuario/proyectos/agencia/informes/resumen_mensual"
+        self.assertEqual(r("leyendo " + ruta), "leyendo " + ruta)
+
+    def test_redact_no_oculta_de_mas(self):
+        r = self.aw_mod.redact
+        for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated"):
+            self.assertEqual(r(text), text)
 
     def test_clean_title(self):
         self.assertEqual(self.aw_mod.clean_title("hacer algo (creada 2026-01-01) (iniciada 2026-01-02)"), "hacer algo")
