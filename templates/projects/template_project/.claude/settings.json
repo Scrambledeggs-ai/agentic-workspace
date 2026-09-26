@@ -24,14 +24,14 @@
     "PostToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "@@AW_CMD@@ hook post-tool", "timeout": 10, "async": true }
+          { "type": "command", "command": "@@AW_CMD@@ hook post-tool", "timeout": 10 }
         ]
       }
     ],
     "PostToolUseFailure": [
       {
         "hooks": [
-          { "type": "command", "command": "@@AW_CMD@@ hook tool-failure", "timeout": 10, "async": true }
+          { "type": "command", "command": "@@AW_CMD@@ hook tool-failure", "timeout": 10 }
         ]
       }
     ],

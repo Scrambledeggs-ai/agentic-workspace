@@ -221,6 +221,14 @@ class TestEstructura(AwCase):
         self.assertEqual(settings["permissions"]["additionalDirectories"],
                          [os.path.join(self.ws, d) for d in ("agents", "skills", "tools", "core", "memory")])
 
+    def test_hooks_de_herramientas_no_son_async(self):
+        project = self.new_project()
+        settings = json.loads(self.read(project, ".claude", "settings.json"))
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            for group in settings["hooks"][event]:
+                for hook in group["hooks"]:
+                    self.assertFalse(hook.get("async"), event)
+
     def test_nombres_invalidos(self):
         self.init()
         for bad in ("../fuera", "template_project", ".oculto"):
@@ -540,6 +548,38 @@ class TestHooks(AwCase):
         self.aw("decide", "Algo", "--why", "porque", cwd=project)
         self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
 
+    def commit_in_session(self, project):
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "c1")
+        self.hook("session-start", self.payload(project), project)
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m c1"}), project)
+
+    def test_session_start_al_reanudar_no_repite_el_aviso(self):
+        project = self.new_project()
+        self.commit_in_session(project)
+        self.assertIn("systemMessage", self.hook("stop", self.payload(project), project).stdout)
+        self.hook("session-start", self.payload(project, source="compact"), project)
+        self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
+
+    def test_session_start_al_compactar_no_pierde_lo_registrado(self):
+        project = self.new_project()
+        self.commit_in_session(project)
+        self.aw("decide", "Algo", "--why", "porque", cwd=project)
+        self.hook("session-start", self.payload(project, source="compact"), project)
+        self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
+
+    def test_hooks_sin_session_id_no_comparten_temporales_entre_proyectos(self):
+        a = self.new_project("a")
+        self.aw("project", "new", "b")
+        b = self.project("b")
+        self.hook("post-tool", {"cwd": a, "tool_name": "Bash", "tool_input": {}}, a)
+        self.hook("session-end", {"cwd": b}, b)
+        self.assertIn("terminada: 0 commit(s), 0 usos de herramientas", self.read(b, "execution", "run_log.md"))
+        self.hook("session-end", {"cwd": a}, a)
+        self.assertIn("terminada: 0 commit(s), 1 usos de herramientas", self.read(a, "execution", "run_log.md"))
+        self.assertEqual(os.listdir(self.sessions), [])
+
     def test_stop_sin_commits_es_silencioso_y_actualiza_estado(self):
         project = self.new_project()
         self.hook("session-start", self.payload(project), project)
@@ -563,6 +603,29 @@ class TestHooks(AwCase):
         month = self.read(self.ws, "logs", "current_month.md")
         self.assertIn("demo — terminada: 0 commit(s), 4 usos de herramientas (clear)", month)
         self.assertRegex(month, r"^# Registro de \d{4}-\d{2}\n")
+        self.assertEqual(os.listdir(self.sessions), [])
+
+    def test_session_end_sigue_si_tool_state_no_es_un_objeto(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "tools", "tool_state.json"), "[]")
+        self.hook("session-start", self.payload(project), project)
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={}), project)
+        self.hook("session-end", self.payload(project, reason="clear"), project)
+        self.assertIn("demo — terminada", self.read(self.ws, "logs", "current_month.md"))
+        self.assertEqual(os.listdir(self.sessions), [])
+        self.assertEqual(self.read(project, "tools", "tool_state.json"), "[]")
+
+    def test_session_end_un_paso_que_falla_no_impide_los_demas(self):
+        project = self.new_project()
+        usage = os.path.join(project, "tools", "tool_usage.md")
+        os.remove(usage)
+        os.makedirs(usage)  # el paso de herramientas no puede escribir aquí
+        self.hook("session-start", self.payload(project), project)
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={}), project)
+        self.hook("session-end", self.payload(project), project)
+        self.assertIn("[sesión] terminada", self.read(project, "execution", "run_log.md"))
+        self.assertIn("demo — terminada", self.read(self.ws, "logs", "current_month.md"))
+        self.assertIn("session-end (herramientas)", self.read(self.ws, "logs", "debug.md"))
         self.assertEqual(os.listdir(self.sessions), [])
 
     def test_session_end_rota_el_log_mensual(self):
@@ -694,6 +757,31 @@ class TestSync(AwCase):
         again = self.aw("sync")
         self.assertIn("al día", again.stdout)
         self.assertEqual(len([f for f in os.listdir(os.path.dirname(path)) if ".bak-" in f]), 1)
+
+    def test_sync_repara_hooks_de_aw_desactualizados_sin_tocar_los_del_usuario(self):
+        project = self.legacy_project()
+        custom = {"hooks": {
+            "PostToolUse": [{"hooks": [
+                {"type": "command", "command": 'python3 "/viejo/generate.py" hook post-tool', "timeout": 5, "async": True},
+                {"type": "command", "command": "mi-tool hook post-tool", "timeout": 3},
+            ]}],
+            "Stop": [{"hooks": [{"type": "command", "command": "otra-tool hook stop"}]}],
+        }}
+        path = os.path.join(project, ".claude", "settings.json")
+        self.write(path, json.dumps(custom))
+        result = self.aw("sync")
+        self.assertIn("hook PostToolUse actualizado", result.stdout)
+        merged = json.loads(slurp(path))
+        mine, theirs = merged["hooks"]["PostToolUse"][0]["hooks"]
+        self.assertIn(SCRIPT, mine["command"])
+        self.assertTrue(mine["command"].endswith(" hook post-tool"))
+        self.assertEqual(mine["timeout"], 10)
+        self.assertNotIn("async", mine)
+        self.assertEqual(theirs, {"type": "command", "command": "mi-tool hook post-tool", "timeout": 3})
+        stop = [h["command"] for g in merged["hooks"]["Stop"] for h in g["hooks"]]
+        self.assertEqual(stop[0], "otra-tool hook stop")
+        self.assertTrue(any("generate.py" in c and c.endswith(" hook stop") for c in stop[1:]))
+        self.assertIn("al día", self.aw("sync").stdout)
 
     def test_sync_no_duplica_hooks_ya_instalados(self):
         project = self.new_project()
@@ -1137,6 +1225,27 @@ class TestFunciones(AwCase):
         merged_again, notes_again = self.aw_mod.merge_settings(merged, template)
         self.assertEqual(notes_again, [])
         self.assertEqual(merged_again, merged)
+
+    def test_merge_settings_no_toma_un_hook_ajeno_por_uno_de_aw(self):
+        existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "otra-tool hook stop"}]}]}}
+        template = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": 'python3 "x/generate.py" hook stop', "timeout": 10}]}]}}
+        merged, notes = self.aw_mod.merge_settings(existing, template)
+        self.assertEqual(len(merged["hooks"]["Stop"]), 2)
+        self.assertEqual(merged["hooks"]["Stop"][0], existing["hooks"]["Stop"][0])
+        self.assertEqual(notes, ["hook Stop"])
+
+    def test_merge_settings_actualiza_en_su_sitio_los_hooks_de_aw(self):
+        old = {"type": "command", "command": 'python3 "/viejo/generate.py" hook stop', "timeout": 5, "async": True}
+        new = {"type": "command", "command": 'python3 "x/generate.py" hook stop', "timeout": 10}
+        existing = {"hooks": {"Stop": [{"hooks": [old]}]}}
+        template = {"hooks": {"Stop": [{"hooks": [new]}]}}
+        merged, notes = self.aw_mod.merge_settings(existing, template)
+        self.assertEqual(merged["hooks"]["Stop"], [{"hooks": [new]}])
+        self.assertEqual(notes, ["hook Stop actualizado"])
+        self.assertTrue(existing["hooks"]["Stop"][0]["hooks"][0]["async"])  # el original no se modifica
+        again, notes_again = self.aw_mod.merge_settings(merged, template)
+        self.assertEqual(notes_again, [])
+        self.assertEqual(again, merged)
 
     def test_render_json_escapa_comillas(self):
         rendered = self.aw_mod.render('{"c": "@@AW_CMD@@ hook x"}', {"AW_CMD": 'python3 "/a b/generate.py"'}, json_safe=True)

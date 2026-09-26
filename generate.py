@@ -847,6 +847,11 @@ def session_path(session_id, suffix):
     return os.path.join(tempfile.gettempdir(), f"aw-{safe}.{suffix}")
 
 
+def session_key(payload, project):
+    # Sin session_id cada proyecto usa su propio nombre de temporal, no uno compartido.
+    return payload.get("session_id") or "sin-sesion-" + hashlib.sha1(project.encode("utf-8")).hexdigest()[:8]
+
+
 def watched_hashes(project):
     hashes = {}
     for rel in ("tasks/backlog.md", "tasks/active.md", "tasks/done.md", "execution/decisions.md"):
@@ -856,9 +861,10 @@ def watched_hashes(project):
 
 def load_session(session_id):
     try:
-        return json.loads(read_text(session_path(session_id, "json")) or "{}")
+        data = json.loads(read_text(session_path(session_id, "json")) or "{}")
     except ValueError:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def session_events(session_id):
@@ -877,8 +883,9 @@ def build_digest(project, max_lines=45, max_chars=4000):
 
 
 def hook_session_start(payload, project):
-    session_id = payload.get("session_id")
-    write_text(session_path(session_id, "json"), json.dumps({"hashes": watched_hashes(project), "reminded": False, "inicio": now_str()}))
+    key = session_key(payload, project)
+    if not load_session(key):  # al reanudar o compactar la sesión ya existe: se conserva su estado
+        write_text(session_path(key, "json"), json.dumps({"hashes": watched_hashes(project), "reminded": False, "inicio": now_str()}))
     log_event(project, "sesión", f"iniciada ({payload.get('source') or 'startup'})")
     refresh_state(project)
     output = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": build_digest(project)}}
@@ -894,9 +901,8 @@ def git_last_commit(cwd):
 
 
 def hook_post_tool(payload, project):
-    session_id = payload.get("session_id")
     tool = str(payload.get("tool_name") or "?")
-    events = session_path(session_id, "events")
+    events = session_path(session_key(payload, project), "events")
     append_text(events, f"T {tool}\n")
     if tool == "Bash":
         command = str((payload.get("tool_input") or {}).get("command") or "")
@@ -916,7 +922,7 @@ def hook_tool_failure(payload, project):
         first = f"{first} — {lines[1]}"  # Claude Code pone el código de salida en la primera línea
     # Solo herramienta y primera línea del error: nunca el comando completo.
     append_text(pj(project, "execution", "errors.md"), f"- {now_str()} [{tool}] {redact(first)[:160]}\n")
-    append_text(session_path(payload.get("session_id"), "events"), "E\n")
+    append_text(session_path(session_key(payload, project), "events"), "E\n")
 
 
 def hook_pre_compact(payload, project):
@@ -926,7 +932,7 @@ def hook_pre_compact(payload, project):
 
 def hook_stop(payload, project):
     refresh_state(project)
-    session_id = payload.get("session_id")
+    session_id = session_key(payload, project)
     session = load_session(session_id)
     if not session or session.get("reminded"):
         return
@@ -969,34 +975,45 @@ def update_tool_usage(project, session_id, tools, commits):
         data = json.loads(read_text(state_path) or "{}")
     except ValueError:
         return
+    if not isinstance(data, dict):
+        return
     data["ultima_sesion"] = {"id": session_id, "fin": now_str(), "commits": commits, "herramientas": dict(tools)}
     data["actualizado"] = now_str()
     write_text(state_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
-def hook_session_end(payload, project):
-    session_id = payload.get("session_id")
-    events = session_events(session_id)
-    commits = sum(1 for line in events if line == "C")
-    tools = {}
-    for line in events:
-        if line.startswith("T "):
-            tools[line[2:]] = tools.get(line[2:], 0) + 1
-    reason = payload.get("reason")
-    summary = f"terminada: {commits} commit(s), {sum(tools.values())} usos de herramientas" + (f" ({reason})" if reason else "")
-    log_event(project, "sesión", summary)
-    update_tool_usage(project, session_id, tools, commits)
-    append_month_log(project, summary)
-    refresh_state(project)
-    for suffix in ("json", "events"):
-        try:
-            os.remove(session_path(session_id, suffix))
-        except OSError:
-            pass
+def run_end_step(name, step, *args):
     try:
-        refresh_workspace_index()
-    except Exception as exc:  # el índice es secundario: un fallo aquí no debe perderse en silencio ni romper nada
-        log_hook_error("session-end (índice)", exc)
+        step(*args)
+    except Exception as exc:  # cada paso del cierre es independiente: un fallo se anota y no impide los demás
+        try:
+            log_hook_error(f"session-end ({name})", exc)
+        except Exception:
+            pass
+
+
+def hook_session_end(payload, project):
+    key = session_key(payload, project)
+    try:
+        events = session_events(key)
+        commits = sum(1 for line in events if line == "C")
+        tools = {}
+        for line in events:
+            if line.startswith("T "):
+                tools[line[2:]] = tools.get(line[2:], 0) + 1
+        reason = payload.get("reason")
+        summary = f"terminada: {commits} commit(s), {sum(tools.values())} usos de herramientas" + (f" ({reason})" if reason else "")
+        run_end_step("registro", log_event, project, "sesión", summary)
+        run_end_step("herramientas", update_tool_usage, project, payload.get("session_id"), tools, commits)
+        run_end_step("registro mensual", append_month_log, project, summary)
+        run_end_step("estado", refresh_state, project)
+        run_end_step("índice", refresh_workspace_index)
+    finally:
+        for suffix in ("json", "events"):
+            try:
+                os.remove(session_path(key, suffix))
+            except OSError:
+                pass
 
 
 HOOK_HANDLERS = {
@@ -1033,8 +1050,27 @@ def run_hook(event):
 # -- Sincronización con la plantilla --
 
 def hook_signature(command):
-    match = re.search(r"\bhook\s+([a-z-]+)", command or "")
-    return match.group(1) if match else command
+    # Solo reconoce los hooks de aw (generate.py o aw seguido de "hook <nombre>"); los demás devuelven None.
+    match = re.search(r'(?:generate\.py"?|\baw)\s+hook\s+([a-z-]+)(?:\s|$)', str(command or ""))
+    return match.group(1) if match else None
+
+
+def hook_key(hook):
+    command = str(hook.get("command") or "")
+    return hook_signature(command) or command
+
+
+def update_hook(installed, wanted):
+    changed = False
+    for field in ("command", "timeout", "async"):
+        if field in wanted:
+            if installed.get(field) != wanted[field]:
+                installed[field] = wanted[field]
+                changed = True
+        elif field == "async" and installed.get("async"):
+            del installed["async"]
+            changed = True
+    return changed
 
 
 def repo_settings_text():
@@ -1065,16 +1101,22 @@ def merge_settings(existing, template):
                 current = hooks.setdefault(event, [])
                 if not isinstance(current, list):
                     continue
+                installed = [h for g in current if isinstance(g, dict)
+                             for h in (g.get("hooks") or []) if isinstance(h, dict)]
                 for group in groups:
-                    signatures = {hook_signature(h.get("command", "")) for h in group.get("hooks", [])}
-                    present = any(
-                        hook_signature(h.get("command", "")) in signatures
-                        for g in current if isinstance(g, dict)
-                        for h in g.get("hooks", []) if isinstance(h, dict)
-                    )
-                    if not present:
+                    wanted = [h for h in group.get("hooks", []) if hook_key(h)]
+                    keys = {hook_key(h) for h in wanted}
+                    found = [h for h in installed if hook_key(h) in keys]
+                    if not found:
                         current.append(group)
                         notes.append(f"hook {event}")
+                        continue
+                    for want in wanted:
+                        if not hook_signature(want.get("command")):
+                            continue  # solo se reparan los hooks de aw; los del usuario se dejan como están
+                        changed = [update_hook(h, want) for h in found if hook_key(h) == hook_key(want)]
+                        if any(changed):
+                            notes.append(f"hook {event} actualizado")
     return merged, notes
 
 
