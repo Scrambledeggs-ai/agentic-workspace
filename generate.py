@@ -12,7 +12,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STRUCTURE_FILE = os.path.join(HERE, "structure.json")
-TEMPLATES_DIR = os.path.join(HERE, "templates")
+TEMPLATES_DIR = os.environ.get("AW_TEMPLATES") or os.path.join(HERE, "templates")
 WRAPPER_NAME = "aw"
 
 
@@ -137,7 +137,7 @@ def read_text(path):
 
 def write_text(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
@@ -184,6 +184,64 @@ def template_content(relpath, variables):
     return render(read_text(path), variables, json_safe=relpath.endswith(".json"))
 
 
+WS_MARK_RE = re.compile(r"<!-- aw:plantilla sha256=([0-9a-f]{64}) -->\n?\Z")
+
+
+def sha256_text(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def workspace_template_body():
+    return template_content("CLAUDE.md", machine_vars())
+
+
+def workspace_claude_md():
+    # El CLAUDE.md del workspace lleva al final la huella de la plantilla que lo generó:
+    # así se sabe si alguien lo modificó y se puede actualizar sin perder cambios propios.
+    body = workspace_template_body()
+    return None if body is None else body + f"<!-- aw:plantilla sha256={sha256_text(body)} -->\n"
+
+
+def split_marker(text):
+    match = WS_MARK_RE.search(text)
+    return (text[:match.start()], match.group(1)) if match else (text, None)
+
+
+def backup_file(path):
+    dest = f"{path}.bak-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    shutil.copy2(path, dest)
+    return dest
+
+
+def ensure_workspace_claude_md(dry_run=False, force=False):
+    # Devuelve (acción, detalle). Acción: None (al día o sin plantilla), "crear", "marcar",
+    # "actualizar" o "difiere" (tiene cambios propios o es una versión anterior sin huella).
+    body = workspace_template_body()
+    if body is None:
+        return None, ""
+    desired = workspace_claude_md()
+    path = os.path.join(ROOT, "CLAUDE.md")
+    current = read_text(path)
+    if not current.strip():
+        if not dry_run:
+            write_text(path, desired)
+        return "crear", "se crearía" if dry_run else "creado"
+    current_body, digest = split_marker(current)
+    if current_body == body:
+        if digest is None:
+            if not dry_run:
+                write_text(path, desired)
+            return "marcar", "igual a la plantilla; se le añadiría la huella" if dry_run else "igual a la plantilla; se le añadió la huella"
+        return None, ""
+    if (digest is not None and sha256_text(current_body) == digest) or force:
+        if dry_run:
+            return "actualizar", "se aplicaría la plantilla nueva (con respaldo previo)"
+        backup = backup_file(path)
+        write_text(path, desired)
+        return "actualizar", f"plantilla nueva aplicada (respaldo: {os.path.basename(backup)})"
+    return "difiere", ""
+
+
 def build(path, node, rel=""):
     if not isinstance(node, dict):
         return
@@ -197,7 +255,7 @@ def build(path, node, rel=""):
         exists = os.path.exists(filepath)
         if exists and os.path.getsize(filepath) > 0:
             continue
-        content = template_content(relpath, variables)
+        content = workspace_claude_md() if relpath == "CLAUDE.md" else template_content(relpath, variables)
         if not exists:
             if content is None and relpath in DEFAULT_HEADERS:
                 name, desc = DEFAULT_HEADERS[relpath]
@@ -231,6 +289,11 @@ def action_init():
     structure = load_structure()
     build(ROOT, structure)
     print("Estructura creada / actualizada. Los archivos ya existentes no se tocaron.")
+    action, detail = ensure_workspace_claude_md()
+    if action in ("actualizar", "marcar"):
+        print(f"CLAUDE.md del workspace: {detail}.")
+    elif action == "difiere":
+        print("CLAUDE.md del workspace: difiere de la plantilla. Usa 'aw sync --workspace' para actualizarlo (se respalda antes).")
 
 
 # -- Registro dinámico de agentes / skills / tools --
@@ -331,12 +394,16 @@ def create_project(name, description=""):
     target = os.path.join(ROOT, "projects", name)
     if os.path.exists(target):
         raise AwError("Ya existe un proyecto con ese nombre.")
-    shutil.copytree(template, target)
+    shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"))
     render_tree(target, project_vars(name, description))
     if not read_text(os.path.join(target, "project.md")).strip():
         write_text(os.path.join(target, "project.md"), f"# {name}\n\n{description}\n")
     log_event(target, "nota", "proyecto creado")
     refresh_state(target)
+    try:
+        refresh_workspace_index()
+    except OSError:
+        pass
     return target
 
 
@@ -650,19 +717,62 @@ def refresh_state(project):
 
 # -- Índices derivados --
 
-def replace_auto_block(path, items, prefix):
-    if not os.path.exists(path):
-        return
-    body = "\n".join(f"- `{prefix}/{item}`" for item in items) if items else "(sin archivos todavía)"
+def replace_block(path, body, header=None):
+    # Reemplaza lo que hay entre las marcas aw:auto; el resto del archivo es del usuario.
     block = f"{AUTO_START}\n{body}\n{AUTO_END}"
     text = read_text(path)
     pattern = re.compile(re.escape(AUTO_START) + r".*?" + re.escape(AUTO_END), re.S)
     if pattern.search(text):
         new = pattern.sub(lambda _m: block, text)
+    elif not text.strip() and header:
+        new = header + block + "\n"
     else:
         new = text.rstrip("\n") + "\n\n" + block + "\n"
     if new != text:
         write_text(path, new)
+
+
+def replace_auto_block(path, items, prefix):
+    if not os.path.exists(path):
+        return
+    body = "\n".join(f"- `{prefix}/{item}`" for item in items) if items else "(sin archivos todavía)"
+    replace_block(path, body)
+
+
+# -- Índice de proyectos del workspace (memory/) --
+
+INDEX_HEADER = ("# Índice de proyectos\n"
+                "<!-- Lo que queda entre las marcas lo regenera aw (aw sync y el cierre de cada sesión); el resto es tuyo. -->\n\n")
+
+
+def project_summary(name):
+    path = os.path.join(ROOT, "projects", name)
+    entries = log_entries(path)
+    last = re.match(r"- (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", entries[-1]) if entries else None
+    return {
+        "estado": summary_line(os.path.join(path, "state.md")),
+        "en_curso": len(load_tasks(path, "active.md")),
+        "pendientes": len(load_tasks(path, "backlog.md")),
+        "ultima_actividad": last.group(1) if last else None,
+    }
+
+
+def refresh_workspace_index():
+    data = {name: project_summary(name) for name in list_projects()}
+    json_path = os.path.join(ROOT, "memory", "context_index.json")
+    try:
+        current = json.loads(read_text(json_path) or "{}")
+    except ValueError:
+        current = None  # JSON roto: no se toca
+    if isinstance(current, dict) and current.get("proyectos") != data:
+        payload = {"actualizado": now_str(), "proyectos": data}
+        write_text(json_path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    rows = ["| Proyecto | Estado | Última actividad |", "|---|---|---|"]
+    for name, info in data.items():
+        rows.append(f"| {name} | {info['estado'].replace('|', '/')} | {info['ultima_actividad'] or '-'} |")
+    if not data:
+        rows.append("| (ninguno todavía) | | |")
+    replace_block(os.path.join(ROOT, "memory", "projects", "project_index.md"), "\n".join(rows), header=INDEX_HEADER)
 
 
 def refresh_artifact_indexes(project):
@@ -866,6 +976,10 @@ def hook_session_end(payload, project):
             os.remove(session_path(session_id, suffix))
         except OSError:
             pass
+    try:
+        refresh_workspace_index()
+    except Exception as exc:  # el índice es secundario: un fallo aquí no debe perderse en silencio ni romper nada
+        log_hook_error("session-end (índice)", exc)
 
 
 HOOK_HANDLERS = {
@@ -904,6 +1018,12 @@ def run_hook(event):
 def hook_signature(command):
     match = re.search(r"\bhook\s+([a-z-]+)", command or "")
     return match.group(1) if match else command
+
+
+def repo_settings_text():
+    # El settings.json de los proyectos lo gestiona aw: se fusiona siempre desde la plantilla del repo,
+    # así lo nuevo (hooks, permisos) llega también a proyectos y plantillas ya existentes.
+    return read_text(os.path.join(TEMPLATES_DIR, "projects", "template_project", ".claude", "settings.json"))
 
 
 def merge_settings(existing, template):
@@ -968,10 +1088,12 @@ def sync_project(project, template, dry_run=False):
     for dirpath, dirs, files in os.walk(template):
         dirs.sort()
         for fname in sorted(files):
+            if ".bak-" in fname:
+                continue
             source = os.path.join(dirpath, fname)
             rel = os.path.relpath(source, template).replace(os.sep, "/")
             if rel == ".claude/settings.json":
-                changes += sync_settings(project, read_text(source), variables, dry_run)
+                changes += sync_settings(project, repo_settings_text() or read_text(source), variables, dry_run)
                 continue
             source_text = read_text(source)
             if not source_text.strip():
@@ -993,7 +1115,7 @@ def sync_project(project, template, dry_run=False):
     return changes
 
 
-def sync_projects(names=None, dry_run=False):
+def sync_projects(names=None, dry_run=False, workspace=False):
     template = os.path.join(ROOT, "projects", "template_project")
     if not dry_run:
         build(ROOT, load_structure())
@@ -1003,6 +1125,18 @@ def sync_projects(names=None, dry_run=False):
     if dry_run:
         print("Modo prueba: no se cambia nada. La plantilla del workspace tampoco se actualiza (usa 'aw init' para eso).")
     total = 0
+    action, detail = ensure_workspace_claude_md(dry_run=dry_run, force=workspace)
+    if action in ("crear", "marcar", "actualizar"):
+        total += 1
+        print(f"- workspace: CLAUDE.md: {detail}")
+    elif action == "difiere":
+        print("- workspace: el CLAUDE.md difiere de la plantilla (cambios tuyos o versión anterior). "
+              "Usa 'aw sync --workspace' para actualizarlo; se respalda antes.")
+    settings_text = repo_settings_text()
+    if settings_text.strip():
+        for change, rel in sync_settings(template, settings_text, project_vars("template_project", ""), dry_run):
+            total += 1
+            print(f"- plantilla: {change}: {rel}")
     for name in projects:
         path = os.path.join(ROOT, "projects", name)
         if not os.path.isdir(path):
@@ -1011,8 +1145,11 @@ def sync_projects(names=None, dry_run=False):
         changes = sync_project(path, template, dry_run)
         total += len(changes)
         print(f"- {name}: " + (f"{len(changes)} cambio(s)" if changes else "al día"))
-        for action, rel in changes:
-            print(f"    {action}: {rel}")
+        for change, rel in changes:
+            print(f"    {change}: {rel}")
+    if not dry_run:
+        refresh_workspace_index()
+        print("- workspace: índice de proyectos al día")
     print(f"Total: {total} cambio(s)" + (" (no aplicados)" if dry_run else "") + ".")
 
 
@@ -1041,6 +1178,8 @@ def doctor_project(project):
         missing = []
         for dirpath, _dirs, files in os.walk(template):
             for fname in files:
+                if ".bak-" in fname:
+                    continue
                 rel = os.path.relpath(os.path.join(dirpath, fname), template).replace(os.sep, "/")
                 if not os.path.exists(pj(project, *rel.split("/"))):
                     missing.append(rel)
@@ -1149,6 +1288,26 @@ def doctor(names=None):
         ("ok" if shutil.which(WRAPPER_NAME) else "warn", "comando 'aw' en el PATH" if shutil.which(WRAPPER_NAME) else "el comando 'aw' no está en el PATH (opción 9 del menú)"),
         ("ok" if os.path.exists(os.path.join(ROOT, "CLAUDE.md")) else "warn", "CLAUDE.md del workspace presente" if os.path.exists(os.path.join(ROOT, "CLAUDE.md")) else "falta el CLAUDE.md del workspace (aw init lo crea)"),
     ]
+    action, _detail = ensure_workspace_claude_md(dry_run=True)
+    if action in ("actualizar", "difiere"):
+        global_checks.append(("warn", "el CLAUDE.md del workspace difiere de la plantilla (aw sync --workspace)"))
+    try:
+        indexed = set(json.loads(read_text(os.path.join(ROOT, "memory", "context_index.json")) or "{}").get("proyectos") or {})
+    except (ValueError, AttributeError):
+        indexed = None
+    if indexed is None:
+        global_checks.append(("warn", "memory/context_index.json es inválido (aw sync no lo toca mientras esté roto)"))
+    else:
+        absent = set(list_projects()) - indexed
+        global_checks.append(("warn", f"el índice de proyectos no incluye {len(absent)} proyecto(s) (aw sync)") if absent
+                             else ("ok", "índice de proyectos al día"))
+    pending = 0
+    for folder in ("core", "memory"):
+        base = os.path.join(ROOT, folder)
+        if os.path.isdir(base):
+            pending += sum(read_text(os.path.join(base, f)).count("(completar)") for f in sorted(os.listdir(base)) if f.endswith(".md"))
+    global_checks.append(("warn", f"{pending} campo(s) '(completar)' por rellenar en core/ y memory/") if pending
+                         else ("ok", "core/ y memory/ sin campos pendientes"))
     print("\nWorkspace")
     for level, text in global_checks:
         counts[level] += 1
@@ -1286,6 +1445,8 @@ def build_parser():
     sync = sub.add_parser("sync", help="lleva a los proyectos lo nuevo de la plantilla")
     sync.add_argument("names", nargs="*")
     sync.add_argument("--dry-run", action="store_true", help="muestra los cambios sin aplicarlos")
+    sync.add_argument("--workspace", action="store_true",
+                      help="actualiza el CLAUDE.md del workspace con la plantilla aunque tenga cambios propios (se respalda antes)")
 
     doc = sub.add_parser("doctor", help="diagnóstico de proyectos")
     doc.add_argument("names", nargs="*")
@@ -1345,7 +1506,7 @@ def dispatch(args):
         if not args.quiet:
             print(read_text(pj(project, "state.md")), end="")
     elif args.cmd == "sync":
-        sync_projects(args.names or None, args.dry_run)
+        sync_projects(args.names or None, args.dry_run, args.workspace)
     elif args.cmd == "doctor":
         return doctor(args.names or None)
     return 0

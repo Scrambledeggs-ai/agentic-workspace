@@ -33,6 +33,12 @@ El proyecto solo indica cuáles usa: `agents/assigned_agents.md` y `skills/assig
 del negocio están en `agents/agent_context.md` y `skills/skill_context.md`. No cargues el resto
 del arsenal. Las herramientas y conectores del proyecto figuran en `tools/assigned_tools.md`.
 
+## Configuración y memoria del workspace
+Consúltalos solo si la tarea lo requiere. Si están vacíos o sin completar, ignóralos.
+- `@@ROOT@@/core/config.md`: configuración del workspace (rutas y reglas, como la de plantillas de entregables).
+- `@@ROOT@@/memory/global.md`: hechos comunes a todos los proyectos aw.
+- `@@ROOT@@/memory/projects/project_index.md`: índice de proyectos con su estado y última actividad (lo regenera aw).
+
 ## Límites
 - `aw task`, `aw decide` y `aw log` solo escriben dentro del proyecto actual.
 - Si el CLAUDE.md global no declara la excepción aw, pide confirmación también para esos comandos.

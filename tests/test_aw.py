@@ -3,6 +3,7 @@
 Cada prueba trabaja en un workspace temporal (AW_HOME) y en un TMPDIR propio,
 así que nunca toca el workspace real ni los archivos de sesión reales.
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -132,6 +133,9 @@ class TestEstructura(AwCase):
         self.assertIn("Aplica solo a proyectos aw", text.splitlines()[2])
         self.assertNotIn("@@", text)
         self.assertIn(os.path.join(self.ws, "agents"), text)
+        for pointer in ("core/config.md", "memory/global.md", "memory/projects/project_index.md"):
+            self.assertIn(os.path.join(self.ws, pointer), text)
+        self.assertIn("Si están vacíos o sin completar, ignóralos", text)
 
     def test_init_no_pisa_contenido_y_rellena_vacios(self):
         self.init()
@@ -146,9 +150,43 @@ class TestEstructura(AwCase):
 
     def test_archivos_sin_plantilla_siguen_igual(self):
         self.init()
-        self.assertEqual(os.path.getsize(os.path.join(self.ws, "core", "init.md")), 0)
+        self.assertEqual(os.path.getsize(os.path.join(self.ws, "logs", "debug.md")), 0)
+        self.assertEqual(os.path.getsize(os.path.join(self.ws, "logs", "current_month.md")), 0)
         header = slurp(os.path.join(self.ws, "agents", "coding_agent.md"))
         self.assertTrue(header.startswith("---\nname: Coding Agent"))
+
+    CORE_Y_MEMORY = ("core/init.md", "core/agent.md", "core/config.md", "core/router.md", "core/memory_policy.md",
+                     "memory/global.md", "memory/user_profile.md", "memory/preferences.md")
+
+    def test_core_y_memory_se_crean_con_formato_base(self):
+        self.init()
+        for rel in self.CORE_Y_MEMORY:
+            text = slurp(os.path.join(self.ws, *rel.split("/")))
+            self.assertTrue(text.startswith("# "), rel)
+            self.assertIn("<!--", text, rel)
+            self.assertNotIn("@@", text, rel)
+        for rel in ("core/config.md", "core/router.md", "core/init.md"):
+            self.assertIn("(completar)", slurp(os.path.join(self.ws, *rel.split("/"))), rel)
+        # Los que remiten a otra fuente lo dicen, en vez de duplicar contenido.
+        self.assertIn("CLAUDE.md", slurp(os.path.join(self.ws, "memory", "user_profile.md")))
+        self.assertIn("no duplica", slurp(os.path.join(self.ws, "memory", "preferences.md")))
+
+    def test_core_y_memory_no_pisan_lo_que_ya_tiene_contenido_y_rellenan_vacios(self):
+        self.init()
+        mine = os.path.join(self.ws, "core", "config.md")
+        self.write(mine, "# Mi configuración\nrutas mías\n")
+        empty = os.path.join(self.ws, "core", "router.md")
+        self.write(empty, "")
+        self.init()
+        self.assertEqual(slurp(mine), "# Mi configuración\nrutas mías\n")
+        self.assertIn("Enrutamiento de tareas", slurp(empty))
+
+    def test_los_formatos_de_core_y_memory_no_traen_datos_personales(self):
+        base = os.path.join(REPO, "templates")
+        for rel in self.CORE_Y_MEMORY:
+            text = slurp(os.path.join(base, *rel.split("/"))).lower()
+            for forbidden in ("/home/", "@", os.path.basename(os.path.expanduser("~")).lower()):
+                self.assertNotIn(forbidden, text, rel)
 
     def test_proyecto_nuevo_sin_marcadores_ni_vacios(self):
         project = self.new_project()
@@ -181,7 +219,7 @@ class TestEstructura(AwCase):
             self.assertIn(" hook ", command)
         self.assertEqual(settings["permissions"]["allow"], ["Bash(aw task *)", "Bash(aw decide *)", "Bash(aw log *)"])
         self.assertEqual(settings["permissions"]["additionalDirectories"],
-                         [os.path.join(self.ws, d) for d in ("agents", "skills", "tools")])
+                         [os.path.join(self.ws, d) for d in ("agents", "skills", "tools", "core", "memory")])
 
     def test_nombres_invalidos(self):
         self.init()
@@ -779,6 +817,18 @@ class TestDoctor(AwCase):
         self.assertIn("3 commit(s) registrados y ninguna decisión", out)
         self.assertIn("1 archivo(s) vacío(s)", out)
 
+    def test_cuenta_los_campos_pendientes_de_core_y_memory(self):
+        self.new_project()
+        out = self.aw("doctor").stdout
+        self.assertRegex(out, r"▲ \d+ campo\(s\) '\(completar\)' por rellenar en core/ y memory/")
+        for folder in ("core", "memory"):
+            base = os.path.join(self.ws, folder)
+            for fname in os.listdir(base):
+                path = os.path.join(base, fname)
+                if fname.endswith(".md"):
+                    self.write(path, slurp(path).replace("(completar)", "listo"))
+        self.assertIn("✓ core/ y memory/ sin campos pendientes", self.aw("doctor").stdout)
+
     def test_doctor_de_un_proyecto_y_proyecto_inexistente(self):
         self.new_project("uno")
         self.aw("project", "new", "dos")
@@ -788,6 +838,204 @@ class TestDoctor(AwCase):
         missing = self.aw("doctor", "nada")
         self.assertEqual(missing.returncode, 1)
         self.assertIn("✕ no existe", missing.stdout)
+
+
+class TestIndiceDelWorkspace(AwCase):
+    def index(self):
+        return json.loads(self.read(self.ws, "memory", "context_index.json"))
+
+    def table(self):
+        return self.read(self.ws, "memory", "projects", "project_index.md")
+
+    def test_las_plantillas_del_indice_traen_formato(self):
+        self.init()
+        self.assertIn("| (ninguno todavía) |", self.table())
+        self.assertEqual(self.index()["proyectos"], {})
+
+    def test_crear_proyectos_los_agrega_al_indice(self):
+        self.new_project("uno")
+        self.aw("project", "new", "dos")
+        index = self.index()
+        self.assertEqual(sorted(index["proyectos"]), ["dos", "uno"])
+        self.assertEqual(index["proyectos"]["uno"]["en_curso"], 0)
+        self.assertRegex(index["proyectos"]["uno"]["ultima_actividad"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertIn("| uno | Estado: 0 en curso", self.table())
+        self.assertIn("| dos |", self.table())
+        self.assertNotIn("(ninguno todavía)", self.table())
+
+    def test_el_cierre_de_sesion_actualiza_el_indice(self):
+        project = self.new_project()
+        self.aw("task", "add", "a", cwd=project)
+        self.aw("task", "start", "T-001", cwd=project)
+        self.hook("session-end", {"session_id": "i1", "cwd": project}, project)
+        info = self.index()["proyectos"]["demo"]
+        self.assertEqual((info["en_curso"], info["pendientes"]), (1, 0))
+        self.assertIn("Estado: 1 en curso", self.table())
+
+    def test_respeta_texto_propio_y_no_toca_json_roto(self):
+        self.new_project()
+        path = os.path.join(self.ws, "memory", "projects", "project_index.md")
+        self.write(path, self.table() + "\nmi nota propia\n")
+        self.write(os.path.join(self.ws, "memory", "context_index.json"), "{ roto")
+        self.aw("project", "new", "otro")
+        self.assertIn("mi nota propia", self.table())
+        self.assertIn("| otro |", self.table())
+        self.assertEqual(self.read(self.ws, "memory", "context_index.json"), "{ roto")
+        self.assertIn("memory/context_index.json es inválido", self.aw("doctor").stdout)
+
+    def test_barra_vertical_en_el_estado_no_rompe_la_tabla(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "state.md"), "Estado: a | b\n")
+        self.hook("session-end", {"session_id": "i2", "cwd": project}, project)
+        self.assertIn("| demo | Estado: a / b |", self.table())
+
+    def test_sync_agrega_proyectos_antiguos_y_el_doctor_lo_confirma(self):
+        self.init()
+        self.write(os.path.join(self.project("viejo"), "state.md"), "Estado: iniciado\n")
+        os.makedirs(os.path.join(self.project("viejo"), "tasks"))
+        self.assertIn("no incluye 1 proyecto(s)", self.aw("doctor").stdout)
+        self.aw("sync")
+        self.assertIn("viejo", self.index()["proyectos"])
+        self.assertIn("| viejo |", self.table())
+        self.assertIn("✓ índice de proyectos al día", self.aw("doctor").stdout)
+
+
+class TestClaudeMdDelWorkspace(AwCase):
+    def setUp(self):
+        super().setUp()
+        self.tpl = os.path.join(self.tmp, "tpl")
+        shutil.copytree(os.path.join(REPO, "templates"), self.tpl)
+
+    def awt(self, *args):
+        env = dict(self.env, AW_TEMPLATES=self.tpl)
+        return subprocess.run([sys.executable, SCRIPT, *args], cwd=self.tmp, env=env, capture_output=True, text=True)
+
+    def path(self):
+        return os.path.join(self.ws, "CLAUDE.md")
+
+    def backups(self):
+        return [f for f in os.listdir(self.ws) if f.startswith("CLAUDE.md.bak-")]
+
+    def edit_template(self, extra):
+        with open(os.path.join(self.tpl, "CLAUDE.md"), "a", encoding="utf-8") as f:
+            f.write(extra)
+
+    def test_lleva_huella_valida(self):
+        self.awt("init")
+        text = slurp(self.path())
+        match = re.search(r"<!-- aw:plantilla sha256=([0-9a-f]{64}) -->\n\Z", text)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), hashlib.sha256(text[:match.start()].encode("utf-8")).hexdigest())
+        self.assertNotIn("@@", text)
+
+    def test_se_actualiza_sola_si_nadie_la_modifico(self):
+        self.awt("init")
+        self.edit_template("\n## Sección nueva\n")
+        out = self.awt("sync").stdout
+        self.assertIn("workspace: CLAUDE.md: plantilla nueva aplicada", out)
+        self.assertIn("## Sección nueva", slurp(self.path()))
+        self.assertEqual(len(self.backups()), 1)
+        self.assertNotIn("Sección nueva", slurp(os.path.join(self.ws, self.backups()[0])))
+        again = self.awt("sync").stdout
+        self.assertNotIn("workspace: CLAUDE.md", again)
+        self.assertEqual(len(self.backups()), 1)
+
+    def test_init_tambien_la_actualiza_si_no_fue_modificada(self):
+        self.awt("init")
+        self.edit_template("\n## Otra sección\n")
+        self.assertIn("plantilla nueva aplicada", self.awt("init").stdout)
+        self.assertIn("## Otra sección", slurp(self.path()))
+
+    def test_no_pisa_cambios_propios_salvo_con_workspace(self):
+        self.awt("init")
+        edited = slurp(self.path()).replace("## Límites", "## Mis límites")
+        self.assertIn("## Mis límites", edited)
+        self.write(self.path(), edited)
+        self.edit_template("\nnuevo\n")
+        out = self.awt("sync").stdout
+        self.assertIn("difiere de la plantilla", out)
+        self.assertIn("aw sync --workspace", out)
+        self.assertIn("## Mis límites", slurp(self.path()))
+        self.assertEqual(self.backups(), [])
+        self.assertIn("difiere de la plantilla", self.awt("init").stdout)
+        dry = self.awt("sync", "--workspace", "--dry-run").stdout
+        self.assertIn("se aplicaría la plantilla nueva", dry)
+        self.assertIn("## Mis límites", slurp(self.path()))
+        self.assertEqual(self.backups(), [])
+        self.assertIn("plantilla nueva aplicada", self.awt("sync", "--workspace").stdout)
+        self.assertIn("nuevo", slurp(self.path()))
+        self.assertNotIn("Mis límites", slurp(self.path()))
+        self.assertIn("## Mis límites", slurp(os.path.join(self.ws, self.backups()[0])))
+
+    def test_version_anterior_sin_huella(self):
+        self.awt("init")
+        current = slurp(self.path())
+        # Igual a la plantilla pero sin huella: solo se le añade la huella.
+        self.write(self.path(), re.sub(r"<!-- aw:plantilla.*?-->\n", "", current))
+        self.assertIn("se le añadió la huella", self.awt("sync").stdout)
+        self.assertEqual(slurp(self.path()), current)
+        # Versión distinta y sin huella (la creada antes de existir este mecanismo): no se pisa sola.
+        self.write(self.path(), "# Protocolo aw (workspace)\nversión anterior\n")
+        self.assertIn("difiere de la plantilla", self.awt("sync").stdout)
+        self.assertEqual(slurp(self.path()), "# Protocolo aw (workspace)\nversión anterior\n")
+        self.assertIn("plantilla nueva aplicada", self.awt("sync", "--workspace").stdout)
+        self.assertEqual(slurp(self.path()), current)
+        self.assertEqual(len(self.backups()), 1)
+
+    def test_archivo_vacio_se_rellena(self):
+        self.awt("init")
+        self.write(self.path(), "")
+        self.awt("init")
+        self.assertIn("Protocolo aw", slurp(self.path()))
+
+    def test_el_doctor_avisa_si_esta_desactualizada(self):
+        self.awt("init")
+        self.awt("project", "new", "x")
+        self.assertNotIn("el CLAUDE.md del workspace difiere", self.awt("doctor").stdout)
+        self.edit_template("\nnuevo\n")
+        self.assertIn("el CLAUDE.md del workspace difiere de la plantilla", self.awt("doctor").stdout)
+        self.awt("sync")
+        self.assertNotIn("el CLAUDE.md del workspace difiere", self.awt("doctor").stdout)
+
+
+class TestSettingsDesdeLaPlantilla(AwCase):
+    def dirs(self, path):
+        return json.loads(slurp(path))["permissions"]["additionalDirectories"]
+
+    def strip_new_dirs(self, path):
+        settings = json.loads(slurp(path))
+        settings["permissions"]["additionalDirectories"] = [
+            d for d in settings["permissions"]["additionalDirectories"] if not d.endswith(("/core", "/memory"))]
+        self.write(path, json.dumps(settings))
+
+    def test_sync_lleva_lo_nuevo_a_proyectos_y_a_la_plantilla(self):
+        project = self.new_project()
+        template = os.path.join(self.ws, "projects", "template_project")
+        paths = [os.path.join(project, ".claude", "settings.json"), os.path.join(template, ".claude", "settings.json")]
+        for path in paths:
+            self.strip_new_dirs(path)
+            self.assertEqual(len(self.dirs(path)), 3)
+        out = self.aw("sync").stdout
+        self.assertIn("- plantilla: actualizar: .claude/settings.json", out)
+        self.assertIn("- demo: 1 cambio(s)", out)
+        for path in paths:
+            self.assertEqual(self.dirs(path)[-2:], [os.path.join(self.ws, "core"), os.path.join(self.ws, "memory")])
+            self.assertEqual(len([f for f in os.listdir(os.path.dirname(path)) if ".bak-" in f]), 1)
+        second = self.aw("sync").stdout
+        self.assertNotIn("- plantilla:", second)
+        self.assertIn("Total: 0 cambio(s)", second)
+
+    def test_los_respaldos_de_la_plantilla_no_llegan_a_proyectos_nuevos(self):
+        self.new_project()
+        template = os.path.join(self.ws, "projects", "template_project", ".claude", "settings.json")
+        self.strip_new_dirs(template)
+        self.aw("sync")
+        self.assertEqual(len([f for f in os.listdir(os.path.dirname(template)) if ".bak-" in f]), 1)
+        self.aw("project", "new", "nuevo")
+        self.assertEqual([f for f in os.listdir(os.path.join(self.project("nuevo"), ".claude")) if ".bak-" in f], [])
+        out = self.aw("doctor", "nuevo").stdout
+        self.assertNotIn("faltan", out)
+        self.assertNotIn("✕", out)
 
 
 class TestFunciones(AwCase):

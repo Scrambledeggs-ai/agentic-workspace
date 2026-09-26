@@ -97,6 +97,8 @@ Cada proyecto creado con aw lleva su estado en archivos, y Claude Code los usa a
 * **Mientras se trabaja**, otros hooks anotan solos los commits, los fallos de herramientas (sin comandos completos ni secretos), las compactaciones y el resumen de cada sesión.
 * **Lo que exige criterio** se registra con comandos de formato fijo (`aw task`, `aw decide`, `aw log`).
 * **El estado** (`state.md`) se genera solo a partir de las tareas y el registro. Si contiene texto escrito a mano, no se sobrescribe.
+* **`core/` y `memory/`** se crean con un formato base para completar a mano (configuración, arranque, enrutamiento, política de memoria, memoria global). Los que solo remiten a otra fuente lo dicen en vez de duplicar contenido. `aw doctor` cuenta los campos `(completar)` que faltan.
+* **El índice de proyectos** del workspace (`memory/projects/project_index.md` y `memory/context_index.json`) lo regenera aw al sincronizar y al cerrar cada sesión: proyecto, estado y última actividad.
 
 Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea desde `templates/`. Nunca bloquean ni interrumpen la sesión: si algo falla, lo anotan en `logs/debug.md`.
 
@@ -113,7 +115,7 @@ Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea d
 | `aw decide "título" --why "motivo" [--alt "alternativas"]` | Registra una decisión; sin motivo no se registra |
 | `aw log "texto"` | Agrega una nota al registro de ejecución |
 | `aw state` | Regenera y muestra `state.md` |
-| `aw sync [proyecto...] [--dry-run]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza |
+| `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes) |
 | `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos y referencias a agentes, skills y herramientas |
 
 Los comandos de tareas, decisiones y notas actúan sobre el proyecto de la carpeta actual (o el indicado con `--project`) y solo escriben dentro de él.

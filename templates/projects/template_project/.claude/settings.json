@@ -8,7 +8,9 @@
     "additionalDirectories": [
       "@@ROOT@@/agents",
       "@@ROOT@@/skills",
-      "@@ROOT@@/tools"
+      "@@ROOT@@/tools",
+      "@@ROOT@@/core",
+      "@@ROOT@@/memory"
     ]
   },
   "hooks": {
