@@ -597,6 +597,7 @@ def clean_title(title):
 
 
 SENSITIVE_KEY = r"[\w.-]{0,64}(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key)[\w.-]{0,64}"
+REDACT_LIMIT = 2000  # caracteres que los hooks pasan a redact como máximo
 LONG_STRING_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])")
 
 
@@ -1027,7 +1028,7 @@ def git_last_commit(cwd):
         result = subprocess.run(["git", "log", "-1", "--format=%h %s"], cwd=cwd, capture_output=True, text=True, timeout=5)
     except Exception:
         return None
-    return redact(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else None
+    return redact(result.stdout.strip()[:REDACT_LIMIT]) if result.returncode == 0 and result.stdout.strip() else None
 
 
 def hook_post_tool(payload, project):
@@ -1051,7 +1052,8 @@ def hook_tool_failure(payload, project):
     if re.fullmatch(r"Exit code \d+", first) and len(lines) > 1:
         first = f"{first} — {lines[1]}"  # Claude Code pone el código de salida en la primera línea
     # Solo herramienta y primera línea del error: nunca el comando completo.
-    append_text(pj(project, "execution", "errors.md"), f"- {now_str()} [{tool}] {redact(first)[:160]}\n")
+    # Se acota antes de redact: sus patrones son costosos con líneas muy largas y el hook tiene un tiempo límite.
+    append_text(pj(project, "execution", "errors.md"), f"- {now_str()} [{tool}] {redact(first[:REDACT_LIMIT])[:160]}\n")
     session_append(session_path(session_key(payload, project), "events"), "E\n")
 
 
@@ -1165,8 +1167,9 @@ def log_hook_error(event, exc):
 def run_hook(event):
     try:
         payload = read_payload()
-        cwd = payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-        project = find_project(cwd)
+        # Primero el proyecto donde se abrió la sesión: el cwd del evento cambia si se hace cd a otra carpeta.
+        session_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        project = (find_project(session_dir) if session_dir else None) or find_project(payload.get("cwd") or os.getcwd())
         handler = HOOK_HANDLERS.get(event)
         if project and handler and os.path.basename(project) != "template_project":
             handler(payload, project)

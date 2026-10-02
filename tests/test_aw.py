@@ -474,6 +474,19 @@ class TestHooks(AwCase):
             result = self.hook(event, {"session_id": "z", "cwd": self.tmp}, self.tmp)
             self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""), event)
 
+    def test_el_proyecto_de_la_sesion_manda_sobre_el_cwd_del_evento(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        other = self.project("b")
+        self.env["CLAUDE_PROJECT_DIR"] = project
+        self.hook("pre-compact", self.payload(other, trigger="auto"), other)
+        self.assertIn("[compactación] auto", self.read(project, "execution", "run_log.md"))
+        self.assertNotIn("[compactación]", self.read(other, "execution", "run_log.md"))
+        # Si la sesión no se abrió dentro de un proyecto, sigue valiendo el cwd del evento.
+        self.env["CLAUDE_PROJECT_DIR"] = self.ws
+        self.hook("pre-compact", self.payload(other, trigger="manual"), other)
+        self.assertIn("[compactación] manual", self.read(other, "execution", "run_log.md"))
+
     def test_hooks_no_tocan_la_plantilla(self):
         self.new_project()
         template = os.path.join(self.ws, "projects", "template_project")
@@ -519,6 +532,17 @@ class TestHooks(AwCase):
         text = self.read(project, "execution", "errors.md")
         self.assertNotIn("abc123SECRETVALUE", text)
         self.assertNotIn("hunter2", text)
+
+    def test_tool_failure_acota_la_linea_antes_de_ocultar_secretos(self):
+        # redact es cuadrático con cadenas largas sin espacios: una línea enorme agotaría el timeout del hook.
+        project = self.new_project()
+        aw = load_aw(self.ws)
+        seen = []
+        original = aw.redact
+        aw.redact = lambda text: seen.append(len(text)) or original(text)
+        aw.hook_tool_failure(self.payload(project, tool_name="Bash", error="a." * 50000), project)
+        self.assertLessEqual(max(seen), 2000)
+        self.assertIn("[Bash] a.a.a.", self.read(project, "execution", "errors.md"))
 
     def test_tool_failure_une_codigo_de_salida_con_el_motivo(self):
         # Formato real que entrega Claude Code: "Exit code N" en la primera línea y el motivo en la segunda.
