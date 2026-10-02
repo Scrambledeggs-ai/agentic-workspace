@@ -106,11 +106,7 @@ def make_header(name, description):
 
 
 def read_header(filepath):
-    try:
-        with open(filepath, "r") as f:
-            lines = f.read().splitlines()
-    except (FileNotFoundError, IsADirectoryError):
-        return None, None
+    lines = read_text(filepath).splitlines()
     if not lines or lines[0].strip() != "---":
         return None, None
     name, desc = None, None
@@ -140,6 +136,8 @@ def read_text(path):
             return f.read()
     except (FileNotFoundError, IsADirectoryError):
         return ""
+    except UnicodeDecodeError:
+        raise AwError(f"El archivo no está en UTF-8: {path}. Conviértelo a UTF-8 y repite el comando.") from None
 
 
 def write_text(path, text):
@@ -351,6 +349,9 @@ def create_registry_item(folder):
     if not name:
         print("Nombre vacío, se cancela.")
         return
+    if "/" in name or "\\" in name or name.startswith("."):
+        print("Nombre inválido.")
+        return
     description = input("Descripción breve: ").strip()
     filename = name.lower().replace(" ", "_") + ".md"
     filepath = os.path.join(dirpath, filename)
@@ -401,11 +402,10 @@ def list_projects():
 def summary_line(filepath):
     if not os.path.exists(filepath):
         return "(sin datos)"
-    with open(filepath) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                return line
+    for line in read_text(filepath).splitlines():
+        line = line.strip()
+        if line:
+            return line
     return "(vacío)"
 
 
@@ -502,10 +502,7 @@ def show_project_file(relparts, empty_msg):
         return
     filepath = os.path.join(ROOT, "projects", name, *relparts)
     print(f"\n-- {'/'.join(relparts)} de {name} --\n")
-    content = ""
-    if os.path.exists(filepath):
-        with open(filepath) as f:
-            content = f.read().strip()
+    content = read_text(filepath).strip()
     print(content if content else empty_msg)
 
 
@@ -1559,8 +1556,14 @@ def doctor_project(project):
         add("warn", "el registro de ejecución no tiene entradas")
     else:
         last = re.match(r"- (\d{4}-\d{2}-\d{2})", entries[-1])
-        age = (datetime.date.today() - datetime.date.fromisoformat(last.group(1))).days if last else 0
-        add("warn" if age > 14 else "ok", f"última actividad registrada hace {age} día(s)")
+        try:
+            age = (datetime.date.today() - datetime.date.fromisoformat(last.group(1))).days if last else 0
+        except ValueError:
+            age = None
+        if age is None:
+            add("warn", "la última entrada del registro tiene una fecha inválida")
+        else:
+            add("warn" if age > 14 else "ok", f"última actividad registrada hace {age} día(s)")
     commits = sum(1 for e in entries if "[commit]" in e)
     if commits >= 3 and not decision_titles(project):
         add("warn", f"{commits} commit(s) registrados y ninguna decisión")
@@ -1720,33 +1723,36 @@ def main_menu():
         print(MENU)
         choice = input("Elegí una opción: ").strip()
         print()
-        if choice == "1":
-            action_new_project()
-        elif choice == "2":
-            action_list_projects()
-        elif choice == "3":
-            action_view_tasks()
-        elif choice == "4":
-            action_view_decisions()
-        elif choice == "5":
-            action_init()
-        elif choice == "6":
-            registry_menu("Agentes", "agents")
-        elif choice == "7":
-            registry_menu("Skills", "skills")
-        elif choice == "8":
-            registry_menu("Herramientas", "tools")
-        elif choice == "9":
-            action_install_command()
-        elif choice == "10":
-            action_doctor()
-        elif choice == "11":
-            action_sync()
-        elif choice == "0":
-            print("Hasta luego.")
-            break
-        else:
-            print("Opción inválida.")
+        try:
+            if choice == "1":
+                action_new_project()
+            elif choice == "2":
+                action_list_projects()
+            elif choice == "3":
+                action_view_tasks()
+            elif choice == "4":
+                action_view_decisions()
+            elif choice == "5":
+                action_init()
+            elif choice == "6":
+                registry_menu("Agentes", "agents")
+            elif choice == "7":
+                registry_menu("Skills", "skills")
+            elif choice == "8":
+                registry_menu("Herramientas", "tools")
+            elif choice == "9":
+                action_install_command()
+            elif choice == "10":
+                action_doctor()
+            elif choice == "11":
+                action_sync()
+            elif choice == "0":
+                print("Hasta luego.")
+                break
+            else:
+                print("Opción inválida.")
+        except AwError as exc:
+            print(exc)
 
 
 # -- Línea de comandos --

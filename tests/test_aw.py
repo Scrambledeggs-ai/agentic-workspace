@@ -257,6 +257,38 @@ class TestEstructura(AwCase):
         agents = self.aw(stdin="6\na\nc\n0\n")
         self.assertIn("Coding Agent", agents.stdout)
 
+    def test_el_menu_no_crea_agentes_skills_ni_herramientas_fuera_de_su_carpeta(self):
+        self.init()
+        agents = os.path.join(self.ws, "agents")
+        before = (sorted(os.listdir(self.ws)), sorted(os.listdir(agents)))
+        for name in ("../fuera", "sub/dentro", "..", ".oculto", "a\\b"):
+            result = self.aw(stdin=f"6\nb\n{name}\ndescripción\nc\n0\n")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Nombre inválido", result.stdout)
+        self.assertEqual((sorted(os.listdir(self.ws)), sorted(os.listdir(agents))), before)
+        created = self.aw(stdin="6\nb\nMi Agente\ndescripción\nc\n0\n")
+        self.assertIn("Creado: agents/mi_agente.md", created.stdout)
+
+    def test_un_archivo_que_no_es_utf8_da_un_error_claro(self):
+        project = self.new_project()
+        path = os.path.join(project, "tasks", "backlog.md")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xfe tarea mal codificada\n")
+        self.assertNotIn("Traceback", self.aw("doctor").stderr)
+        for args in (("task", "list"), ("task", "add", "x"), ("sync",)):
+            result = self.aw(*args, cwd=project)
+            self.assertEqual(result.returncode, 2, args)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("no está en UTF-8", result.stderr)
+            self.assertIn(path, result.stderr)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"\xff\xfe tarea mal codificada\n")
+        with open(os.path.join(project, "state.md"), "wb") as f:
+            f.write(b"\xff\xfe\n")
+        menu = self.aw(stdin="2\n0\n")
+        self.assertEqual(menu.returncode, 0, menu.stderr)
+        self.assertIn("no está en UTF-8", menu.stdout)
+
 
 class TestTareas(AwCase):
     def task_lines(self, project, name):
@@ -1170,6 +1202,15 @@ class TestDoctor(AwCase):
         missing = self.aw("doctor", "nada")
         self.assertEqual(missing.returncode, 1)
         self.assertIn("✕ no existe", missing.stdout)
+
+    def test_doctor_no_se_cae_con_una_fecha_invalida_en_el_registro(self):
+        project = self.new_project()
+        with open(os.path.join(project, "execution", "run_log.md"), "a", encoding="utf-8") as f:
+            f.write("- 2026-13-45 10:00 [nota] fecha imposible\n")
+        result = self.aw("doctor")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("▲ la última entrada del registro tiene una fecha inválida", result.stdout)
+        self.assertIn("Resumen:", result.stdout)
 
     def test_doctor_rechaza_nombres_invalidos(self):
         self.new_project("uno")
