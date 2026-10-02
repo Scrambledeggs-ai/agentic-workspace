@@ -1708,11 +1708,13 @@ def doctor_project(project):
         for cells in markdown_rows(read_text(notes)):
             if len(cells) < 2 or not cells[1] or cells[1] == "(completar)":
                 continue
-            target = os.path.expanduser(cells[1])
-            if not os.path.isabs(target):
-                target = os.path.join(ROOT, folder, target)
-            if not os.path.exists(target):
-                add("bad", f"{label} asignados: no existe {cells[1]} (fila '{cells[0]}')")
+            # Se acepta el nombre del archivo, la ruta desde la raíz (agents/x.md), una ruta absoluta o con ~,
+            # y cualquiera de ellas entre comillas invertidas.
+            name = cells[1].strip("`").strip()
+            target = os.path.expanduser(name)
+            candidates = [target] if os.path.isabs(target) else [os.path.join(ROOT, folder, target), os.path.join(ROOT, target)]
+            if not any(os.path.exists(candidate) for candidate in candidates):
+                add("bad", f"{label} asignados: no existe {name} (fila '{cells[0]}')")
 
     mcp_names = set()
     try:

@@ -1355,6 +1355,31 @@ class TestDoctor(AwCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn("asignados", result.stdout)
 
+    def test_acepta_las_formas_habituales_de_escribir_un_agente_o_skill_asignado(self):
+        project = self.new_project()
+        self.write(os.path.join(self.ws, "skills", "auditor.skill", "SKILL.md"), "instrucciones")
+        absolute = os.path.join(self.ws, "agents", "coding_agent.md")
+        self.write(os.path.join(project, "agents", "assigned_agents.md"),
+                   "# Agentes\n\n| Tarea | Agente (archivo) | Notas |\n|---|---|---|\n"
+                   "| Solo nombre | coding_agent.md | |\n"
+                   "| Con carpeta | agents/coding_agent.md | |\n"
+                   "| Entre comillas | `coding_agent.md` | |\n"
+                   "| Carpeta y comillas | `agents/coding_agent.md` | |\n"
+                   f"| Absoluta | {absolute} | |\n")
+        self.write(os.path.join(project, "skills", "assigned_skills.md"),
+                   "# Skills\n\n| Tarea | Skill | Notas |\n|---|---|---|\n"
+                   "| Carpeta | skills/auditor.skill | |\n| Comillas | `auditor.skill` | |\n")
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("asignados", result.stdout)
+        self.write(os.path.join(project, "agents", "assigned_agents.md"),
+                   "# Agentes\n\n| Tarea | Agente (archivo) | Notas |\n|---|---|---|\n"
+                   "| Falta | `agents/no_existe.md` | |\n| Fuera | ../../no_existe.md | |\n")
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("✕ agentes asignados: no existe agents/no_existe.md (fila 'Falta')", result.stdout)
+        self.assertIn("✕ agentes asignados: no existe ../../no_existe.md (fila 'Fuera')", result.stdout)
+
     def test_compara_herramientas_con_mcp_json(self):
         project = self.new_project()
         self.write(os.path.join(project, "tools", "assigned_tools.md"),
