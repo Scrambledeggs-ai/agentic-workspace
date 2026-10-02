@@ -1514,8 +1514,10 @@ def migration_created(project):
 
 def is_untouched_by_aw(project):
     # Una carpeta que aw todavía no convirtió en proyecto. No basta con que falte state.md: es un archivo
-    # generado, que puede estar ignorado en git o haberse borrado en un proyecto que ya es de aw.
-    return not any(os.path.exists(pj(project, name)) for name in ("state.md", "tasks", "execution"))
+    # generado, que puede estar ignorado en git o haberse borrado en un proyecto que ya es de aw. Se miran archivos
+    # con nombre propio de aw, no carpetas: un proyecto puede tener su tasks/ o su execution/ con otro uso.
+    return not any(os.path.exists(pj(project, *rel.split("/")))
+                   for rel in ("state.md", "tasks/backlog.md", "execution/run_log.md"))
 
 
 def sync_project(project, sources, dry_run=False):
@@ -1557,9 +1559,14 @@ def sync_project(project, sources, dry_run=False):
             write_text(pj(project, *rel.split("/")), render(sources[rel], variables, json_safe=rel.lower().endswith(".json")))
     if write_ficha:
         changes.append(("crear", MIGRATION_FILE))
-    if migrating and changes and not dry_run:
-        log_event(project, "nota", f"proyecto migrado a aw: {len(created)} archivo(s) creados, "
-                                   f"{len(kept)} propio(s) respetado(s)")
+    if not dry_run:
+        if migrating and changes:
+            log_event(project, "nota", f"proyecto migrado a aw: {len(created)} archivo(s) creados, "
+                                       f"{len(kept)} propio(s) respetado(s)")
+        elif "proyecto migrado a aw" not in read_text(pj(project, "execution", "run_log.md")):
+            listed = migration_created(project)  # una migración que se cortó antes de dejar su entrada en el registro
+            if listed:
+                log_event(project, "nota", f"proyecto migrado a aw: {len(listed)} archivo(s) creados")
     if not dry_run:
         refresh_state(project)
         refresh_artifact_indexes(project)
@@ -1652,6 +1659,11 @@ def run_git(project, *args):
     return result if result.returncode in (0, 1) else None
 
 
+def is_aw_claude_md(text):
+    # El que genera aw empieza con "# CLAUDE.md — <proyecto>"; cualquier otro es propio del proyecto.
+    return text.startswith("# CLAUDE.md — ")
+
+
 def project_claude_md(project):
     try:
         return read_text(pj(project, "CLAUDE.md"))
@@ -1660,9 +1672,10 @@ def project_claude_md(project):
 
 
 def aw_local_files(project):
-    # A la lista fija se suma el CLAUDE.md del proyecto solo si contiene la ruta de este workspace (los que generó
-    # una versión anterior de aw la llevan); uno sin esa ruta es contenido del proyecto.
-    return list(AW_LOCAL_FILES) + (["CLAUDE.md"] if ROOT in project_claude_md(project) else [])
+    # A la lista fija se suma el CLAUDE.md del proyecto solo si lo generó aw y contiene la ruta de este workspace
+    # (los de una versión anterior la llevan); sin esa ruta, o si es propio, es contenido del proyecto.
+    text = project_claude_md(project)
+    return list(AW_LOCAL_FILES) + (["CLAUDE.md"] if is_aw_claude_md(text) and ROOT in text else [])
 
 
 def git_exposure(project, files=None):
@@ -1854,8 +1867,7 @@ def doctor_project(project):
     for level, text in doctor_git(project):
         add(level, text)
 
-    # El que genera aw empieza con "# CLAUDE.md — <proyecto>"; cualquier otro es propio del proyecto.
-    own_claude_md = os.path.exists(pj(project, "CLAUDE.md")) and not project_claude_md(project).startswith("# CLAUDE.md — ")
+    own_claude_md = os.path.exists(pj(project, "CLAUDE.md")) and not is_aw_claude_md(project_claude_md(project))
     add(*check(os.path.exists(pj(project, "CLAUDE.md")),
                "CLAUDE.md del proyecto presente" + (" (propio, no generado por aw)" if own_claude_md else ""),
                "falta el CLAUDE.md del proyecto (aw sync lo crea)"))

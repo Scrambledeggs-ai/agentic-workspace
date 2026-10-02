@@ -1378,6 +1378,12 @@ class TestMigracion(AwCase):
         out = self.aw("doctor", "repo").stdout
         self.assertIn("✓ CLAUDE.md del proyecto presente (propio, no generado por aw)", out)
         self.assertNotIn("/CLAUDE.md", out)
+        # Un CLAUDE.md propio y versionado no pasa a ser "de aw" por mencionar una ruta del workspace.
+        self.write(os.path.join(folder, "CLAUDE.md"), f"# Instrucciones propias\nLos datos están en {self.ws}/datos\n")
+        out = self.aw("doctor", "repo").stdout
+        self.assertNotIn("ya están versionados", out)
+        self.assertNotIn("/CLAUDE.md", out)
+        self.write(os.path.join(folder, "CLAUDE.md"), "# Instrucciones propias\n")
         # El bloque completo de doctor deja a la vista solo lo que es del usuario.
         self.assertIn("Para ignorar todo lo que agregó aw", out)
         block = out.split("Para ignorar todo lo que agregó aw")[1]
@@ -1447,6 +1453,18 @@ class TestMigracion(AwCase):
         for rel in created:
             self.assertTrue(os.path.isfile(os.path.join(folder, *rel.split("/"))), rel)
         self.assertEqual(self.created(folder), created)
+        self.assertEqual(self.read(folder, "execution", "run_log.md").count("proyecto migrado a aw"), 1)
+        self.aw("sync", "suelto")
+        self.assertEqual(self.read(folder, "execution", "run_log.md").count("proyecto migrado a aw"), 1)
+
+    def test_una_carpeta_tasks_propia_no_impide_reconocer_la_migracion(self):
+        folder = self.loose_folder()
+        self.write(os.path.join(folder, "tasks", "celery.py"), "x = 1\n")
+        self.write(os.path.join(folder, "execution", "plan.txt"), "x\n")
+        out = self.aw("sync", "suelto").stdout
+        self.assertIn("crear: MIGRACION.md", out)
+        self.assertIn("proyecto migrado a aw", self.read(folder, "execution", "run_log.md"))
+        self.assertEqual(self.read(folder, "tasks", "celery.py"), "x = 1\n")
 
     def test_un_settings_propio_no_figura_como_respetado(self):
         folder = self.loose_folder()
