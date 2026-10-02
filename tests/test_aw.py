@@ -2706,6 +2706,27 @@ class TestFunciones(AwCase):
         self.assertNotIn("k9k9k9", r("https://api.x.io/v1?key=k9k9k9"))
         self.assertEqual(r("ssh://git@github.com/a/b.git"), "ssh://git@github.com/a/b.git")
 
+    def test_redact_contrasenas_con_barra_o_arroba_en_urls(self):
+        r = self.aw_mod.redact
+        for text, secret in (("git clone https://usuario:pa/ss@github.com/a/b.git", "pa/ss"),
+                             ("git clone https://usuario:p@ss@github.com/a/b.git", "p@ss"),
+                             ("postgres://admin:a/b@c@db.local:5432/app", "a/b@c")):
+            masked = r(text)
+            self.assertNotIn(secret, masked, text)
+            self.assertIn("[oculto]@", masked, text)
+        self.assertIn("github.com/a/b.git", r("git clone https://usuario:pa/ss@github.com/a/b.git"))
+        self.assertEqual(r("https://host:8080/ruta"), "https://host:8080/ruta")
+
+    def test_redact_secretos_con_comillas_escapadas(self):
+        r = self.aw_mod.redact
+        for text, secret in ((r'password="ab\"cd" resto', "cd"),
+                             (r'curl -d "{\"password\": \"hunter2\"}" https://x', "hunter2"),
+                             (r'sh -c "curl -H \"Authorization: Token abc123\" x"', "abc123"),
+                             (r'sh -c "tool --password \"hun ter\" run"', "ter"),
+                             (r"API_KEY=\"abc 123\"", "123")):
+            self.assertNotIn(secret, r(text), text)
+        self.assertIn("resto", r(r'password="ab\"cd" resto'))
+
     def test_redact_base64_con_barras_y_rutas_largas(self):
         r = self.aw_mod.redact
         key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"

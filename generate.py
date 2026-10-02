@@ -671,7 +671,10 @@ SENSITIVE_WORD = (r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key
 SENSITIVE_KEY = r"[\w.-]{0,64}" + SENSITIVE_WORD + r"[\w.-]{0,64}"
 AUTH_SCHEME = r"(?:bearer|basic|token|digest|negotiate|api-?key)"
 REDACT_LIMIT = 2000  # caracteres que los hooks pasan a redact como máximo
-SECRET_VALUE = r"(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)"
+# Entre comillas dobles se admiten comillas escapadas (\"), como en QUOTED_RE, y también un valor entero entre
+# comillas escapadas (\"con espacios\"), como queda dentro de otro texto entre comillas.
+QUOTED_VALUE = r"""(?:"(?:[^"\\]|\\.)*"|\\"(?:[^\\"]|\\[^"])*\\"|'[^']*')"""
+SECRET_VALUE = r"(?!\[oculto\])(?:" + QUOTED_VALUE + r"|\S+)"
 OPTION_RE = re.compile(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r"[\w-]*)\s+(?!-)" + SECRET_VALUE)
 OPTION_NOT_SECRET_RE = re.compile(r"-(?:prompt|limit|count|length|size|type|stdin|ttl)$", re.I)
 LONG_STRING_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])")
@@ -691,12 +694,13 @@ def mask_option(match):
 
 
 def redact(text):
-    text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:" + AUTH_SCHEME + r"\s+)?\S+)",
+    text = re.sub(r"(?i)\b(authorization)\\?[\"']?\s*[:=]\s*(?:" + QUOTED_VALUE + r"|(?:" + AUTH_SCHEME + r"\s+)?\S+)",
                   r"\1 [oculto]", text)
     text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [oculto]", text)
-    text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
+    # La contraseña puede llevar / o @: se oculta hasta el último @ de la URL, aunque a veces tape de más.
+    text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:\S*@", r"\1[oculto]@", text)
     text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
-    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*" + SECRET_VALUE, r"\1 [oculto]", text)
+    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")\\?[\"']?\s*[=:]\s*" + SECRET_VALUE, r"\1 [oculto]", text)
     # Opciones de línea de comandos con el valor separado por un espacio.
     text = OPTION_RE.sub(mask_option, text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
