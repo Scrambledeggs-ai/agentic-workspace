@@ -113,6 +113,8 @@ def is_git_commit(command):
 
 HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
 
+TEXT_EXT = (".md", ".json")  # los únicos archivos que aw interpreta; lo demás no lo lee
+
 ARTIFACT_INDEX_FILES = ("outputs.md", "code_snippets.md", "assets_index.md")
 ASSET_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".mp4", ".mov", ".mp3", ".wav", ".fig"}
 
@@ -438,7 +440,7 @@ def summary_line(filepath):
 def render_tree(root_dir, variables):
     for dirpath, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if not fname.endswith((".md", ".json")):
+            if not fname.endswith(TEXT_EXT):
                 continue
             fpath = os.path.join(dirpath, fname)
             text = read_text(fpath)
@@ -1392,21 +1394,26 @@ def walk_order(rel):
     return [(1, part) for part in parts[:-1]] + [(0, parts[-1])]
 
 
-def template_sources(template, overlay=None):
-    sources = {}
+def template_files(template):
+    # Los archivos de la plantilla que aw gestiona, como (ruta relativa, ruta): solo .md y .json, sin respaldos.
+    # Lo demás (un .DS_Store, una imagen) no se lee ni se lleva a los proyectos.
     for dirpath, _dirs, files in os.walk(template):
         for fname in files:
-            if ".bak-" in fname:
-                continue
-            source = os.path.join(dirpath, fname)
-            rel = os.path.relpath(source, template).replace(os.sep, "/")
-            if rel == ".claude/settings.json" and repo_settings_text().strip():
-                sources[rel] = ""  # se usa el del repo: el de la plantilla no hace falta leerlo
-                continue
-            try:
-                sources[rel] = read_text(source)
-            except OSError:
-                continue  # enlace en bucle o archivo sin permiso de lectura: no se usa
+            if fname.endswith(TEXT_EXT) and ".bak-" not in fname:
+                path = os.path.join(dirpath, fname)
+                yield os.path.relpath(path, template).replace(os.sep, "/"), path
+
+
+def template_sources(template, overlay=None):
+    sources = {}
+    for rel, source in template_files(template):
+        if rel == ".claude/settings.json" and repo_settings_text().strip():
+            sources[rel] = ""  # se usa el del repo: el de la plantilla no hace falta leerlo
+            continue
+        try:
+            sources[rel] = read_text(source)
+        except OSError:
+            continue  # enlace en bucle o archivo sin permiso de lectura: no se usa
     sources.update(overlay or {})
     return sources
 
@@ -1591,18 +1598,14 @@ def doctor_project(project):
     fillable = set()  # archivos que aw sync rellena si están vacíos: los que la plantilla trae con contenido
     if os.path.isdir(template):
         missing = []
-        for dirpath, _dirs, files in os.walk(template):
-            for fname in files:
-                if ".bak-" in fname:
-                    continue
-                rel = os.path.relpath(os.path.join(dirpath, fname), template).replace(os.sep, "/")
-                try:
-                    if os.path.getsize(os.path.join(dirpath, fname)):
-                        fillable.add(rel)
-                except OSError:
-                    continue  # enlace simbólico roto en la plantilla: sync tampoco lo copia
-                if not os.path.exists(pj(project, *rel.split("/"))):
-                    missing.append(rel)
+        for rel, source in template_files(template):
+            try:
+                if os.path.getsize(source):
+                    fillable.add(rel)
+            except OSError:
+                continue  # enlace simbólico roto en la plantilla: sync tampoco lo copia
+            if not os.path.exists(pj(project, *rel.split("/"))):
+                missing.append(rel)
         if missing:
             add("warn", f"faltan {len(missing)} archivo(s) de la plantilla (aw sync los crea): " + ", ".join(sorted(missing)[:4]) + ("…" if len(missing) > 4 else ""))
         else:

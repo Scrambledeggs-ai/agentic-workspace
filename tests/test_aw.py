@@ -1232,6 +1232,31 @@ class TestSync(AwCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "no")))
         self.assertEqual(self.aw("init").returncode, 0)
 
+    def test_aw_solo_interpreta_md_y_json_de_la_plantilla(self):
+        project = self.new_project()
+        template = self.project("template_project")
+        for rel in (".DS_Store", os.path.join("sop", ".DS_Store"), os.path.join("sop", "logo.png")):
+            with open(os.path.join(template, rel), "wb") as f:
+                f.write(b"\x00\x00\x00\x01Bud1\xff\xfe\x89PNG")
+        self.write(os.path.join(template, "sop", "notas.txt"), "texto que aw no gestiona\n")
+        for args in (("sync", "--dry-run"), ("sync",)):
+            result = self.aw(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("- demo: al día", result.stdout)
+        doctor = self.aw("doctor")
+        self.assertIn("✓ estructura completa", doctor.stdout)
+        self.assertNotIn("faltan", doctor.stdout)
+        for rel in (".DS_Store", os.path.join("sop", "logo.png"), os.path.join("sop", "notas.txt")):
+            self.assertFalse(os.path.exists(os.path.join(project, rel)), rel)
+        # Un .md de la plantilla mal codificado sí es asunto de aw: error claro con su nombre.
+        bad = os.path.join(template, "sop", "rules.md")
+        with open(bad, "wb") as f:
+            f.write(b"\xff\xfe reglas")
+        result = self.aw("sync")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no está en UTF-8", result.stderr)
+        self.assertIn(bad, result.stderr)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")
