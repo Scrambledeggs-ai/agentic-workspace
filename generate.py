@@ -515,6 +515,16 @@ def check_project_name(name):
         raise AwError("Nombre de proyecto inválido.")
 
 
+TEMPLATE_ERROR = "template_project es la plantilla, no un proyecto: no se modifica desde estos comandos."
+
+
+def check_project_names(names):
+    for name in names or []:
+        check_project_name(name)
+        if name == "template_project":
+            raise AwError(TEMPLATE_ERROR)
+
+
 def resolve_project(name=None):
     if name:
         check_project_name(name)
@@ -526,7 +536,7 @@ def resolve_project(name=None):
         if not path:
             raise AwError("No se está dentro de un proyecto aw (carpeta con state.md y tasks/). Usa --project NOMBRE.")
     if os.path.basename(path) == "template_project":
-        raise AwError("template_project es la plantilla, no un proyecto: no se modifica desde estos comandos.")
+        raise AwError(TEMPLATE_ERROR)
     return path
 
 
@@ -1283,8 +1293,7 @@ def sync_project(project, template, dry_run=False):
 
 
 def sync_projects(names=None, dry_run=False, workspace=False):
-    for name in names or []:
-        check_project_name(name)
+    check_project_names(names)
     template = os.path.join(ROOT, "projects", "template_project")
     if not dry_run:
         build(ROOT, load_structure())
@@ -1539,8 +1548,7 @@ def doctor_project(project):
 
 
 def doctor(names=None):
-    for name in names or []:
-        check_project_name(name)
+    check_project_names(names)
     symbols = {"ok": "✓", "warn": "▲", "bad": "✕"}
     counts = {"ok": 0, "warn": 0, "bad": 0}
     print("aw doctor")

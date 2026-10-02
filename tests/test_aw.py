@@ -923,6 +923,17 @@ class TestSync(AwCase):
         self.assertIn("Proyecto b", doctor.stdout)
         self.assertIn("Resumen:", doctor.stdout)
 
+    def test_sync_y_doctor_rechazan_la_plantilla_como_proyecto(self):
+        self.new_project()
+        template = self.project("template_project")
+        before = self.snapshot(template)
+        for command in ("sync", "doctor"):
+            result = self.aw(command, "demo", "template_project")
+            self.assertEqual(result.returncode, 2, command)
+            self.assertIn("template_project es la plantilla", result.stderr)
+            self.assertNotIn("demo", result.stdout)
+        self.assertEqual(self.snapshot(template), before)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")
