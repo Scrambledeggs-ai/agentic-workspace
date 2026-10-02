@@ -5,6 +5,7 @@ __pycache__/
 # Uso interno de desarrollo (no se suben)
 /NEXT_STEPS.md
 /CLAUDE.md
+/CLAUDE.md.bak-*
 /.claude/
 
 # Generado por generate.py (raíz del workspace en un clon suelto)

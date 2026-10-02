@@ -89,7 +89,12 @@ AUTO_END = "<!-- aw:auto:fin -->"
 PRIO_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 TASK_RE = re.compile(r"^- \[( |x)\] (T-\d+) \[(P[0-3])\] (.*)$")
 DATE_SUFFIX_RE = re.compile(r"(\s*\((?:creada|iniciada|hecha) \d{4}-\d{2}-\d{2}\))+\s*$")
-GIT_COMMIT_RE = re.compile(r"(^|[;&|(\n]\s*)git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(\s|$)")
+# git commit al inicio de un comando: tras un separador o dentro de sh -c "...", con sudo, env o VAR=valor delante.
+# No cuenta con --dry-run (no crea ningún commit).
+GIT_COMMIT_RE = re.compile(
+    r"""(?:^|[;&|(\n]\s*|\b(?:ba|z|da)?sh\s+-[a-z]*c\s+["']\s*)"""
+    r"""(?:(?:sudo|env)\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"""
+    r"""git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(?=\s|$|["')])(?![^;&|\n]*\s--dry-run(?:\s|$|["')]))""")
 
 HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
 

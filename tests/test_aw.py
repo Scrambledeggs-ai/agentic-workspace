@@ -1827,11 +1827,15 @@ class TestFunciones(AwCase):
         rx = self.aw_mod.GIT_COMMIT_RE
         for yes in ("git commit -m x", "git commit", "cd a && git commit -m y", "git -c user.name=a commit -m y",
                     "git --no-pager commit", "npm test; git commit -am z",
-                    "git add -A\ngit commit -m x", "cd a\n  git commit -m y", "(git commit -m x)", "echo $(git commit -m x)"):
+                    "git add -A\ngit commit -m x", "cd a\n  git commit -m y", "(git commit -m x)", "echo $(git commit -m x)",
+                    "sudo git commit -m x", "GIT_AUTHOR_NAME=a git commit -m x", "env A=1 B=2 git commit",
+                    'bash -c "git commit -m x"', "sh -c 'git commit'", "cd a && sudo A=1 git commit -m x"):
             self.assertTrue(rx.search(yes), yes)
         for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls",
-                   "echo hola\ngit log --grep commit"):
+                   "echo hola\ngit log --grep commit", "git commit --dry-run", "git commit -m x --dry-run",
+                   'echo "git commit -m x"', "sudo git status", "A=1 git log"):
             self.assertFalse(rx.search(no), no)
+        self.assertTrue(rx.search("git commit --dry-run; git commit -m x"))
 
     def test_merge_settings_no_modifica_el_original(self):
         existing = {"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "otro.sh"}]}]}}
