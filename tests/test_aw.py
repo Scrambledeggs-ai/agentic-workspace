@@ -913,6 +913,15 @@ class TestHooks(AwCase):
         self.assertNotIn("viejo", current)
         self.assertIn("demo — terminada", current)
 
+    def test_al_archivar_un_mes_que_ya_tenia_archivo_no_se_repite_la_cabecera(self):
+        project = self.new_project()
+        self.write(os.path.join(self.ws, "logs", "2020-01.md"), "# Registro de 2020-01\n\n- primero\n")
+        self.write(os.path.join(self.ws, "logs", "current_month.md"), "# Registro de 2020-01\n\n- segundo\n")
+        self.hook("session-end", self.payload(project), project)
+        archived = self.read(self.ws, "logs", "2020-01.md")
+        self.assertEqual(archived.count("# Registro de 2020-01"), 1)
+        self.assertEqual(archived, "# Registro de 2020-01\n\n- primero\n- segundo\n")
+
     def test_log_mensual_con_texto_ajeno_no_se_rota(self):
         project = self.new_project()
         self.write(os.path.join(self.ws, "logs", "current_month.md"), "notas mías\n")
@@ -2736,6 +2745,44 @@ class TestFunciones(AwCase):
             self.assertEqual(result.stdout, path)
         self.assertEqual(self.aw_mod.machine_vars()["AW_CMD"], "python3 " + quote(SCRIPT))
 
+    def install_with_home(self, home, answer):
+        previous = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        asked = []
+        self.aw_mod.input = lambda prompt="": asked.append(prompt) or answer
+        try:
+            with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+                self.aw_mod.action_install_command()
+        finally:
+            del self.aw_mod.input
+            if previous is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous
+        return asked
+
+    def test_el_instalador_pregunta_antes_de_reemplazar_otro_programa_llamado_aw(self):
+        home = os.path.join(self.tmp, "home")
+        wrapper = os.path.join(home, ".local", "bin", "aw")
+        self.write(wrapper, "#!/bin/sh\necho otro programa\n")
+        self.assertTrue(self.install_with_home(home, "n"))
+        self.assertEqual(slurp(wrapper), "#!/bin/sh\necho otro programa\n")
+        self.assertTrue(self.install_with_home(home, "s"))
+        self.assertIn("exec python3 " + self.aw_mod.sh_quote(SCRIPT), slurp(wrapper))
+        self.assertEqual(self.install_with_home(home, "n"), [])  # el comando de aw se reinstala sin preguntar
+        self.assertIn("exec python3 " + self.aw_mod.sh_quote(SCRIPT), slurp(wrapper))
+
+    def test_append_text_no_relee_lo_que_ya_habia(self):
+        path = os.path.join(self.tmp, "registro.md")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xfe sin salto")  # contenido anterior que no es UTF-8
+        self.aw_mod.append_text(path, "- nueva\n")
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"\xff\xfe sin salto\n- nueva\n")
+        self.aw_mod.append_text(path, "- otra\n")
+        with open(path, "rb") as f:
+            self.assertTrue(f.read().endswith(b"- nueva\n- otra\n"))
+
     def test_el_instalador_no_escribe_a_traves_de_un_enlace_simbolico(self):
         home = os.path.join(self.tmp, "home")
         bin_dir = os.path.join(home, ".local", "bin")
@@ -2744,16 +2791,7 @@ class TestFunciones(AwCase):
         os.makedirs(bin_dir)
         wrapper = os.path.join(bin_dir, "aw")
         os.symlink(victim, wrapper)
-        previous = os.environ.get("HOME")
-        os.environ["HOME"] = home
-        try:
-            with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
-                self.aw_mod.action_install_command()
-        finally:
-            if previous is None:
-                os.environ.pop("HOME", None)
-            else:
-                os.environ["HOME"] = previous
+        self.install_with_home(home, "s")  # el enlace apunta a algo que no es aw: se pregunta
         self.assertEqual(slurp(victim), "intacto")
         self.assertFalse(os.path.islink(wrapper))
         self.assertIn("exec python3 " + self.aw_mod.sh_quote(SCRIPT), slurp(wrapper))

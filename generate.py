@@ -166,10 +166,18 @@ def write_text(path, text):
 
 
 def append_text(path, text):
+    # Solo mira el último byte: el registro y los errores crecen y no hace falta releerlos en cada escritura.
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    existing = read_text(path)
+    needs_newline = False
+    try:
+        with open(path, "rb") as f:
+            if f.seek(0, os.SEEK_END):
+                f.seek(-1, os.SEEK_END)
+                needs_newline = f.read(1) != b"\n"
+    except (FileNotFoundError, IsADirectoryError):
+        pass
     with open(path, "a", encoding="utf-8") as f:
-        if existing and not existing.endswith("\n"):
+        if needs_newline:
             f.write("\n")
         f.write(text)
 
@@ -402,7 +410,8 @@ def registry_menu(label, folder):
 
 # Carpetas que dejan las herramientas de desarrollo: no son proyectos ni se recorren dentro de uno.
 HEAVY_DIRS = {"node_modules", "__pycache__", "venv"}
-# Carpetas de projects/ que nunca son un proyecto; check_project_name rechaza esos nombres.
+# Carpetas de projects/ que nunca son un proyecto. check_project_name rechaza las pesadas; check_project_names,
+# además, la plantilla.
 NOT_PROJECTS = {"template_project"} | HEAVY_DIRS
 
 
@@ -1201,7 +1210,7 @@ def append_month_log(project, text):
         if header and header.group(1) != month:
             dest = os.path.join(logs, f"{header.group(1)}.md")
             if os.path.exists(dest):
-                append_text(dest, existing)
+                append_text(dest, re.sub(r"\A# Registro de \d{4}-\d{2}[^\n]*\n\n?", "", existing))  # sin repetir la cabecera
                 write_text(path, "")
             else:
                 os.replace(path, dest)
@@ -2209,6 +2218,15 @@ def doctor(names=None):
 
 # -- Instalación del comando en el sistema --
 
+def is_aw_wrapper(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    return head.startswith(b"#!/bin/sh\nexec python3 ") and b'generate.py" "$@"' in head
+
+
 def action_install_command():
     if sys.platform.startswith("win"):
         print("El instalador todavía no soporta Windows. Por ahora usa 'python3 generate.py' directamente.")
@@ -2217,6 +2235,11 @@ def action_install_command():
     os.makedirs(bin_dir, exist_ok=True)
     wrapper_path = os.path.join(bin_dir, WRAPPER_NAME)
     script_path = os.path.abspath(__file__)
+    if os.path.lexists(wrapper_path) and not is_aw_wrapper(wrapper_path):
+        answer = input(f"Ya existe {wrapper_path} y no es el comando de aw. ¿Reemplazarlo? (s/n): ").strip().lower()
+        if answer != "s":
+            print("No se instaló: el archivo que ya estaba queda como estaba.")
+            return
     # write_text reemplaza el archivo: si en ese lugar hay un enlace simbólico, no escribe a través de él.
     write_text(wrapper_path, f'#!/bin/sh\nexec python3 {sh_quote(script_path)} "$@"\n')
     st = os.stat(wrapper_path)
