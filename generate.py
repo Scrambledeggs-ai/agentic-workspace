@@ -98,13 +98,14 @@ QUOTED_RE = re.compile(r""""(?:[^"\\]|\\.)*"|'[^']*'""")
 
 
 def is_git_commit(command):
-    # Con --dry-run no cuenta (no crea ningún commit). El texto entre comillas no se mira: un mensaje de
-    # commit que menciona --dry-run sigue siendo un commit real.
+    # Con --dry-run no cuenta (no crea ningún commit). Solo se miran los argumentos de la misma línea que
+    # están fuera de comillas: un mensaje que menciona --dry-run, entre comillas o en un heredoc, es un commit real.
     command = str(command or "")
     for match in GIT_COMMIT_RE.finditer(command):
-        rest = QUOTED_RE.sub('""', command[match.end():])
-        arguments = re.split(r"[;&|\n]", rest, maxsplit=1)[0]
-        if not re.search(r"""(?:^|\s)--dry-run(?=\s|$|["')])""", arguments):
+        line = QUOTED_RE.sub("Q", command[match.end():].split("\n", 1)[0])
+        line = re.split(r"[\"']", line, maxsplit=1)[0]  # una comilla sin cerrar abre un mensaje de varias líneas
+        arguments = re.split(r"[;&|]", line, maxsplit=1)[0]
+        if not re.search(r"(?:^|\s)--dry-run(?=\s|$|\))", arguments):
             return True
     return False
 
@@ -410,8 +411,8 @@ def registry_menu(label, folder):
 
 # Carpetas que dejan las herramientas de desarrollo: no son proyectos ni se recorren dentro de uno.
 HEAVY_DIRS = {"node_modules", "__pycache__", "venv"}
-# Carpetas de projects/ que nunca son un proyecto.
-NOT_PROJECTS = {"template_project"} | HEAVY_DIRS
+# Carpetas de projects/ que nunca son un proyecto; tampoco se puede crear un proyecto con esos nombres.
+NOT_PROJECTS = {"template_project", "node_modules", "__pycache__"}
 
 
 def list_projects():
@@ -446,10 +447,15 @@ def render_tree(root_dir, variables):
                 write_text(fpath, new)
 
 
+def ignore_template_extras(dirpath, names):
+    # Al copiar la plantilla no se llevan los respaldos ni los enlaces simbólicos rotos.
+    return [n for n in names if ".bak-" in n or not os.path.exists(os.path.join(dirpath, n))]
+
+
 def create_project(name, description=""):
     name = (name or "").strip()
     check_project_name(name)
-    if name == "template_project":
+    if name in NOT_PROJECTS:
         raise AwError("Nombre de proyecto inválido.")
     template = os.path.join(ROOT, "projects", "template_project")
     if not os.path.isdir(template):
@@ -463,7 +469,7 @@ def create_project(name, description=""):
     except FileExistsError:
         raise AwError("Ya existe un proyecto con ese nombre.") from None
     try:
-        shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"), dirs_exist_ok=True)
+        shutil.copytree(template, target, ignore=ignore_template_extras, dirs_exist_ok=True)
         render_tree(target, variables)
         # La plantilla del workspace puede venir de un aw anterior: los hooks y permisos se toman del repo.
         settings_text = repo_settings_text()
@@ -659,9 +665,32 @@ def mask_long_string(match):
     return "[oculto]"
 
 
-def mask_key_value(match):
-    # Un nombre de archivo seguido de ":" (test_pass.py:12:) no es una clave con su valor.
-    return match.group(0) if FILE_NAME_RE.search(match.group(1)) else match.group(1) + " [oculto]"
+KEY_VALUE_RE = re.compile(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)")
+OPTION_RE = re.compile(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r"[\w-]*)\s+(?!\[oculto\]|-)(?:\"[^\"]*\"|'[^']*'|\S+)")
+OPTION_NOT_SECRET_RE = re.compile(r"-(?:prompt|limit|count|length|size|type|stdin|ttl)$", re.I)
+
+
+def mask_key_values(text):
+    # clave=valor y clave: valor. Una referencia archivo.ext:línea (test_pass.py:12:) no es una clave con su
+    # valor: se deja el nombre y se sigue revisando lo que viene después, que sí puede traer un secreto.
+    parts, pos = [], 0
+    while True:
+        match = KEY_VALUE_RE.search(text, pos)
+        if not match:
+            break
+        key = match.group(1)
+        if FILE_NAME_RE.search(key) and re.match(r":\d+(?=:|\s|$)", text[match.end(1):]):
+            parts.append(text[pos:match.end(1)])
+            pos = match.end(1)
+        else:
+            parts.append(text[pos:match.start()] + key + " [oculto]")
+            pos = match.end()
+    return "".join(parts) + text[pos:]
+
+
+def mask_option(match):
+    # --password x, --api-key x, --secret-key x. Las opciones que no llevan un secreto como valor se dejan.
+    return match.group(0) if OPTION_NOT_SECRET_RE.search(match.group(1)) else match.group(1) + " [oculto]"
 
 
 def redact(text):
@@ -670,11 +699,8 @@ def redact(text):
     text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [oculto]", text)
     text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
     text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
-    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)", mask_key_value, text)
-    # Opciones de línea de comandos con el valor separado por un espacio: --password x, --api-key x.
-    # La palabra sensible debe cerrar el nombre de la opción: --no-password-prompt o --token-limit no cuentan.
-    text = re.sub(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r")(?![\w-])\s+(?!\[oculto\]|-)(?:\"[^\"]*\"|'[^']*'|\S+)",
-                  r"\1 [oculto]", text)
+    text = mask_key_values(text)
+    text = OPTION_RE.sub(mask_option, text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
     return LONG_STRING_RE.sub(mask_long_string, text)
 
@@ -1251,15 +1277,29 @@ def run_hook(event):
 
 # -- Sincronización con la plantilla --
 
-HOOK_SIGNATURE_RE = re.compile(
-    r"""(?:(?:^|[\s"'/\\])generate\.py["']?|(?:^|[\s"';&|(/\\])aw["']?)\s+hook\s+([a-z-]+)(?=$|[\s"';&|)])""")
+HOOK_TAIL = r"""\s+hook\s+([a-z-]+)(?=$|[\s"';&|)])"""
+HOOK_SCRIPT_RE = re.compile(r"""(?:^|[\s"'/\\])generate\.py["']?""" + HOOK_TAIL)
+# El comando aw: suelto, con una ruta delante o con la ruta entre comillas (puede llevar espacios).
+HOOK_WRAPPER_RES = (re.compile(r"""(?:^|[\s"';&|(])((?:[^\s"';&|()]*[/\\])?)aw["']?""" + HOOK_TAIL),
+                    re.compile(r"""["']([^"']*[/\\])aw["']""" + HOOK_TAIL))
+
+
+def is_wrapper_path(path):
+    # Otro ejecutable llamado aw en otra ruta es del usuario: solo cuenta el comando que instala aw.
+    installed = (os.path.expanduser(os.path.join("~", ".local", "bin", WRAPPER_NAME)), shutil.which(WRAPPER_NAME))
+    real = os.path.realpath(os.path.expanduser(path))
+    return any(candidate and os.path.realpath(candidate) == real for candidate in installed)
 
 
 def hook_signature(command):
-    # Solo reconoce los hooks de aw: generate.py o aw como palabra completa, seguido de "hook <evento conocido>",
-    # con o sin comillas alrededor (también dentro de bash -c "..."). Los demás devuelven None.
-    match = HOOK_SIGNATURE_RE.search(str(command or ""))
-    return match.group(1) if match and match.group(1) in HOOK_EVENTS else None
+    # Solo reconoce los hooks de aw: generate.py o el comando aw, seguido de "hook <evento conocido>", con o sin
+    # comillas alrededor (también dentro de bash -c "..."). Los demás devuelven None.
+    command = str(command or "")
+    events = [match.group(1) for match in HOOK_SCRIPT_RE.finditer(command)]
+    for pattern in HOOK_WRAPPER_RES:
+        events += [match.group(2) for match in pattern.finditer(command)
+                   if not match.group(1) or is_wrapper_path(match.group(1) + WRAPPER_NAME)]
+    return next((event for event in events if event in HOOK_EVENTS), None)
 
 
 def hook_key(hook):
@@ -1336,6 +1376,8 @@ def sync_settings(project, source_text, variables, dry_run, backup=True):
         return [("crear", ".claude/settings.json")]
     try:
         existing = json.loads(read_text(dest) or "{}")
+    except AwEncodingError:
+        return [("omitir", ".claude/settings.json (no está en UTF-8; no se toca)")]
     except ValueError:
         return [("omitir", ".claude/settings.json (JSON inválido; no se toca)")]
     if not isinstance(existing, dict):
@@ -1392,7 +1434,8 @@ def preview_template():
         preview = os.path.join(tmp, "template_project")
         source = os.path.join(ROOT, "projects", "template_project")
         if os.path.isdir(source):
-            shutil.copytree(source, preview, symlinks=True, ignore=shutil.ignore_patterns("*.bak-*"))
+            # Se copia el contenido de los enlaces, no los enlaces: build() no debe escribir fuera de la copia.
+            shutil.copytree(source, preview, ignore=ignore_template_extras)
         node = as_dict(as_dict(load_structure().get("projects")).get("folders")).get("template_project")
         build(preview, node, os.path.join("projects", "template_project"))
         yield preview
@@ -1630,6 +1673,9 @@ def doctor_project(project):
             if not isinstance(settings, dict):
                 settings = None
                 add("bad", ".claude/settings.json no es un objeto JSON")
+        except AwEncodingError:
+            settings = None
+            add("bad", ".claude/settings.json no está en UTF-8")
         except ValueError:
             settings = None
             add("bad", ".claude/settings.json tiene JSON inválido")

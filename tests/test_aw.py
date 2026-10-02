@@ -270,8 +270,9 @@ class TestEstructura(AwCase):
         self.assertIn("Creado: agents/mi_agente.md", created.stdout)
 
     def test_el_menu_escribe_y_lee_en_utf8_sin_depender_del_sistema(self):
-        self.init()
         strict = [sys.executable, "-X", "warn_default_encoding", "-W", "error::EncodingWarning", SCRIPT]
+        init = subprocess.run(strict + ["init"], cwd=self.tmp, env=self.env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(init.returncode, 0, init.stderr)
         result = subprocess.run(strict, cwd=self.tmp, env=self.env, input="6\nb\nDiseño\ncon acentos\na\nc\n0\n",
                                 capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -280,14 +281,20 @@ class TestEstructura(AwCase):
         with open(os.path.join(self.ws, "agents", "diseño.md"), "rb") as f:
             self.assertIn("Diseño".encode("utf-8"), f.read())
 
-    def test_un_entorno_virtual_sin_punto_no_es_proyecto_ni_se_indexa(self):
+    def test_un_entorno_virtual_sin_punto_dentro_del_proyecto_no_se_indexa(self):
         project = self.new_project()
         self.write(os.path.join(project, "venv", "lib", "modulo.py"), "x")
-        self.write(os.path.join(self.project("venv"), "lib", "modulo.py"), "x")
         self.aw("sync")
-        self.assertEqual(load_aw(self.ws).list_projects(), ["demo"])
         files = json.loads(self.read(project, "context_index.json"))["archivos"]
         self.assertEqual([f for f in files if f.startswith("venv/")], [])
+
+    def test_no_se_crean_proyectos_con_nombres_que_aw_ignora(self):
+        self.init()
+        for name in ("node_modules", "__pycache__", "template_project"):
+            result = self.aw("project", "new", name)
+            self.assertEqual(result.returncode, 2, name)
+            self.assertIn("Nombre de proyecto inválido", result.stderr)
+        self.assertFalse(os.path.exists(self.project("node_modules")))
 
     def test_un_archivo_que_no_es_utf8_da_un_error_claro(self):
         project = self.new_project()
@@ -1096,13 +1103,13 @@ class TestSync(AwCase):
                 f.write(raw)
         sync = self.aw("sync")
         self.assertEqual(sync.returncode, 0, sync.stderr)
-        self.assertIn("JSON inválido; no se toca", sync.stdout)
+        self.assertIn(".claude/settings.json (no está en UTF-8; no se toca)", sync.stdout)
         self.assertIn("- b:", sync.stdout)
         with open(settings, "rb") as f:
             self.assertEqual(f.read(), raw)
         doctor = self.aw("doctor")
         self.assertEqual(doctor.returncode, 1, doctor.stderr)
-        self.assertIn("✕ .claude/settings.json tiene JSON inválido", doctor.stdout)
+        self.assertIn("✕ .claude/settings.json no está en UTF-8", doctor.stdout)
         self.assertIn("Proyecto b", doctor.stdout)
         with open(os.path.join(self.ws, "memory", "context_index.json"), "wb") as f:
             f.write(raw)
@@ -1120,7 +1127,27 @@ class TestSync(AwCase):
         dry = self.aw("sync", "--dry-run")
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertEqual(os.listdir(self.sessions), [])
+        new = self.aw("project", "new", "otro")
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertFalse(os.path.lexists(os.path.join(self.project("otro"), "sop", "roto.md")))
         self.assertEqual(self.aw("sync").returncode, 0)
+
+    def test_el_modo_prueba_no_escribe_a_traves_de_los_enlaces_de_la_plantilla(self):
+        self.new_project()
+        template = self.project("template_project")
+        outside = os.path.join(self.tmp, "fuera")
+        os.makedirs(os.path.join(outside, "carpeta"))
+        self.write(os.path.join(outside, "compartido.md"), "contenido compartido\n")
+        os.remove(os.path.join(template, "sop", "rules.md"))
+        os.symlink(os.path.join(outside, "no-existe.md"), os.path.join(template, "sop", "rules.md"))
+        os.symlink(os.path.join("..", "..", "..", "..", "fuera", "compartido.md"), os.path.join(template, "sop", "extra.md"))
+        shutil.rmtree(os.path.join(template, "skills"))
+        os.symlink(os.path.join(outside, "carpeta"), os.path.join(template, "skills"))
+        dry = self.aw("sync", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertEqual(sorted(os.listdir(outside)), ["carpeta", "compartido.md"])
+        self.assertEqual(os.listdir(os.path.join(outside, "carpeta")), [])
+        self.assertIn("crear: sop/extra.md", dry.stdout)  # el enlace relativo se resuelve como en la sincronización real
 
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
@@ -1904,10 +1931,23 @@ class TestFunciones(AwCase):
         r = self.aw_mod.redact
         for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated",
                      "pass: 3 fail: 0", "tests passed=3", "bypass=1", "--password --verbose",
-                     "tests/test_pass.py:12: AssertionError", "Error: file my_pass.txt: not found",
-                     "git: --no-password-prompt is not valid here", "modelo --token-limit 5 excedido",
-                     "src/token_utils.py:12: error de sintaxis", "ver secret_manager.md: sección 2"):
+                     "tests/test_pass.py:12: AssertionError", "src/token_utils.py:12: error de sintaxis",
+                     "git: --no-password-prompt is not valid here", "modelo --token-limit 5 excedido"):
             self.assertEqual(r(text), text)
+
+    def test_redact_no_deja_pasar_secretos_por_las_excepciones(self):
+        # Una referencia archivo:línea no se oculta, pero lo que venga después se sigue revisando.
+        r = self.aw_mod.redact
+        for text, secret in (("secrets.py:3:PASSWORD=hunter2", "hunter2"),
+                             ('./config/secrets.py:12:API_KEY="abc123def"', "abc123def"),
+                             ('settings_token.json:{"token":"abc123"}', "abc123"),
+                             ("db_password.txt: hunter2", "hunter2"),
+                             ("config.pass:1234", "1234"),
+                             ("mc alias set x --secret-key hunter2", "hunter2"),
+                             ("tool --private-key-passphrase hunter2", "hunter2"),
+                             ("tool --password1 hunter2", "hunter2")):
+            self.assertNotIn(secret, r(text), text)
+        self.assertEqual(r("secrets.py:3:PASSWORD=hunter2"), "secrets.py:3:PASSWORD [oculto]")
 
     def test_clean_title(self):
         self.assertEqual(self.aw_mod.clean_title("hacer algo (creada 2026-01-01) (iniciada 2026-01-02)"), "hacer algo")
@@ -1929,12 +1969,15 @@ class TestFunciones(AwCase):
                     'bash -c "git commit -m x"', "sh -c 'git commit'", "cd a && sudo A=1 git commit -m x",
                     'git commit -m "sync --dry-run compara contra la plantilla"', "git commit -m 'doc: explica --dry-run'",
                     "bash -c \"git commit -m 'x --dry-run'\"", "git commit --dry-run; git commit -m x",
-                    "git commit --dry-run\ngit commit -m x"):
+                    "git commit --dry-run\ngit commit -m x",
+                    "git commit -m \"$(cat <<'EOF'\nAdd \"aw sync --dry-run\" docs\nEOF\n)\"",
+                    "git commit -F - <<'EOF'\nexplica --dry-run\nEOF"):
             self.assertTrue(check(yes), yes)
         for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls",
                    "echo hola\ngit log --grep commit", "git commit --dry-run", "git commit -m x --dry-run",
                    'echo "git commit -m x"', "sudo git status", "A=1 git log", 'git commit -m "a; b" --dry-run',
-                   'bash -c "git commit --dry-run"', "git commit --dry-run && git status", "", None):
+                   'bash -c "git commit --dry-run"', "git commit --dry-run && git status",
+                   'git commit --dry-run -m "x"', "", None):
             self.assertFalse(check(no), no)
 
     def test_merge_settings_no_modifica_el_original(self):
@@ -1992,12 +2035,32 @@ class TestFunciones(AwCase):
         sig = self.aw_mod.hook_signature
         for command in ('python3 "/a b/generate.py" hook stop', "python3 '/a b/generate.py' hook stop",
                         "python3 /a/generate.py hook stop", 'bash -c "python3 /a/generate.py hook stop"',
-                        "sh -c 'aw hook stop'", "aw hook stop", "cd /x && aw hook stop",
-                        "/home/u/.local/bin/aw hook stop", "./aw hook stop", '"/home/u/mi bin/aw" hook stop'):
+                        "sh -c 'aw hook stop'", "aw hook stop", "cd /x && aw hook stop"):
             self.assertEqual(sig(command), "stop", command)
         for command in ("otra-tool hook stop", "otra-aw hook stop", "python3 mi-generate.py hook stop",
                         "aw hook inventado", "aw hook stop-all", None, 5):
             self.assertIsNone(sig(command), command)
+
+    def test_hook_signature_con_ruta_solo_reconoce_el_comando_instalado(self):
+        sig = self.aw_mod.hook_signature
+        home = os.path.join(self.tmp, "mi home")
+        wrapper = os.path.join(home, ".local", "bin", "aw")
+        self.write(wrapper, "#!/bin/sh\n")
+        previous = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        try:
+            for command in (f'"{wrapper}" hook stop', f"'{wrapper}' hook stop", "~/.local/bin/aw hook stop",
+                            f'bash -c "cd /x && ~/.local/bin/aw hook stop"'):
+                self.assertEqual(sig(command), "stop", command)
+            # Otro ejecutable llamado aw, o una ruta que solo termina en aw, es un hook del usuario.
+            for command in ("/opt/otra-herramienta/bin/aw hook stop", "rsync -a /srv/aw hook stop",
+                            "echo x >/tmp/aw hook stop", "./aw hook stop", '"/opt/otra cosa/aw" hook stop'):
+                self.assertIsNone(sig(command), command)
+        finally:
+            if previous is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous
 
     def test_merge_settings_no_duplica_un_hook_de_aw_escrito_de_otra_forma(self):
         new = {"type": "command", "command": 'python3 "x/generate.py" hook stop', "timeout": 10}
