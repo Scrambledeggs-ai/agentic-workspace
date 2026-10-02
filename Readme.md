@@ -81,6 +81,20 @@ aw
 
 Disponible por ahora solo en Linux/Mac. Si `~/.local/bin` no está en tu `PATH`, el instalador te indica la línea a agregar en `~/.bashrc` o `~/.zshrc`.
 
+### Actualizar aw
+
+La opción **12) Actualizar aw desde su repositorio** del menú, o el comando:
+
+```bash
+aw update --dry-run
+```
+
+```bash
+aw update
+```
+
+`aw update` consulta el repositorio del que se clonó aw, muestra los commits nuevos, los aplica y ejecuta `aw sync` con la versión nueva. Con `--dry-run` solo muestra si hay novedades. Nunca mezcla ni descarta nada: se niega si la carpeta de aw tiene cambios locales sin guardar, si tiene commits propios que el repositorio no tiene, si la rama actual no sigue a una rama remota o si aw no se instaló con `git clone` (en ese caso hay que reemplazar los archivos a mano). Los archivos sin seguimiento de git no lo impiden.
+
 ---
 
 ## Descripción
@@ -119,6 +133,7 @@ Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea d
 | `aw state` | Regenera y muestra `state.md` |
 | `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes). Si un proyecto es un repo git y `sync` le añadió archivos de aw sin ignorar, lo avisa |
 | `aw unsync NOMBRE [--dry-run] [--yes]` | Deshace la sincronización de un proyecto migrado: borra los archivos que creó aw, solo si siguen sin cambios. Si alguno tiene cambios, avisa y no borra nada. Nunca toca lo que existía antes |
+| `aw update [--dry-run]` | Actualiza aw desde el repositorio del que se clonó (solo como avance directo, sin mezclar) y sincroniza los proyectos con la versión nueva |
 | `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos, referencias a agentes, skills y herramientas, y, si el proyecto está en un repo git, qué archivos de aw no están ignorados (un `git add .` los incluiría) o ya están versionados, con las líneas para ignorarlos solo en local (`.git/info/exclude`) |
 
 ### Migrar un proyecto que ya existe
