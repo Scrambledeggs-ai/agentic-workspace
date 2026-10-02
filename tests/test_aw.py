@@ -257,6 +257,38 @@ class TestEstructura(AwCase):
         agents = self.aw(stdin="6\na\nc\n0\n")
         self.assertIn("Coding Agent", agents.stdout)
 
+    def test_el_menu_no_crea_agentes_skills_ni_herramientas_fuera_de_su_carpeta(self):
+        self.init()
+        agents = os.path.join(self.ws, "agents")
+        before = (sorted(os.listdir(self.ws)), sorted(os.listdir(agents)))
+        for name in ("../fuera", "sub/dentro", "..", ".oculto", "a\\b"):
+            result = self.aw(stdin=f"6\nb\n{name}\ndescripción\nc\n0\n")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Nombre inválido", result.stdout)
+        self.assertEqual((sorted(os.listdir(self.ws)), sorted(os.listdir(agents))), before)
+        created = self.aw(stdin="6\nb\nMi Agente\ndescripción\nc\n0\n")
+        self.assertIn("Creado: agents/mi_agente.md", created.stdout)
+
+    def test_un_archivo_que_no_es_utf8_da_un_error_claro(self):
+        project = self.new_project()
+        path = os.path.join(project, "tasks", "backlog.md")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xfe tarea mal codificada\n")
+        self.assertNotIn("Traceback", self.aw("doctor").stderr)
+        for args in (("task", "list"), ("task", "add", "x"), ("sync",)):
+            result = self.aw(*args, cwd=project)
+            self.assertEqual(result.returncode, 2, args)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("no está en UTF-8", result.stderr)
+            self.assertIn(path, result.stderr)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"\xff\xfe tarea mal codificada\n")
+        with open(os.path.join(project, "state.md"), "wb") as f:
+            f.write(b"\xff\xfe\n")
+        menu = self.aw(stdin="2\n0\n")
+        self.assertEqual(menu.returncode, 0, menu.stderr)
+        self.assertIn("no está en UTF-8", menu.stdout)
+
 
 class TestTareas(AwCase):
     def task_lines(self, project, name):
@@ -1171,6 +1203,53 @@ class TestDoctor(AwCase):
         self.assertEqual(missing.returncode, 1)
         self.assertIn("✕ no existe", missing.stdout)
 
+    def test_doctor_solo_cuenta_los_vacios_que_sync_puede_rellenar(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "src", "__init__.py"), "")
+        self.write(os.path.join(project, "notas.md"), "")
+        self.assertIn("✓ ningún archivo vacío", self.aw("doctor").stdout)
+        self.write(os.path.join(project, "sop", "rules.md"), "")
+        self.assertIn("1 archivo(s) vacío(s) (aw sync los rellena): sop/rules.md", self.aw("doctor").stdout)
+
+    def test_bloque_automatico_con_marcas_desparejas_no_se_toca_y_doctor_avisa(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "artifacts", "informe.html"), "<html></html>")
+        path = os.path.join(project, "artifacts", "outputs.md")
+        text = "# Entregables\n\n<!-- aw:auto:inicio -->\nviejo\n\nmi texto importante\n"  # se borró la marca de fin
+        self.write(path, text)
+        self.aw("sync")
+        self.aw("sync")
+        self.assertEqual(slurp(path), text)
+        self.assertIn("▲ marcas aw:auto desparejas en artifacts/outputs.md", self.aw("doctor").stdout)
+        self.write(path, text + "<!-- aw:auto:fin -->\n")
+        self.aw("sync")
+        self.assertIn("- `artifacts/informe.html`", slurp(path))
+        self.assertNotIn("desparejas", self.aw("doctor").stdout)
+
+    def test_doctor_avisa_si_el_registro_mensual_no_tiene_cabecera(self):
+        self.new_project()
+        self.assertNotIn("current_month.md", self.aw("doctor").stdout)
+        self.write(os.path.join(self.ws, "logs", "current_month.md"), "notas mías\n- 2026-01-01 10:00 demo — algo\n")
+        self.assertIn("▲ logs/current_month.md no empieza con '# Registro de AAAA-MM'", self.aw("doctor").stdout)
+
+    def test_doctor_avisa_de_las_notas_de_asignacion_sin_ignorar(self):
+        project = self.new_project("uno")
+        self.git(project, "init", "-q")
+        out = self.aw("doctor", "uno").stdout
+        patterns = self.apply_exclude_suggestions(out, os.path.join(project, ".git", "info", "exclude"))
+        self.assertIn("/agents/assigned_agents.md", patterns)
+        self.assertIn("/skills/assigned_skills.md", patterns)
+        self.assertIn("✓ archivos de aw ignorados por git", self.aw("doctor", "uno").stdout)
+
+    def test_doctor_no_se_cae_con_una_fecha_invalida_en_el_registro(self):
+        project = self.new_project()
+        with open(os.path.join(project, "execution", "run_log.md"), "a", encoding="utf-8") as f:
+            f.write("- 2026-13-45 10:00 [nota] fecha imposible\n")
+        result = self.aw("doctor")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("▲ la última entrada del registro tiene una fecha inválida", result.stdout)
+        self.assertIn("Resumen:", result.stdout)
+
     def test_doctor_rechaza_nombres_invalidos(self):
         self.new_project("uno")
         for name in ("../..", "..", ".oculto", "a/b", ""):
@@ -1748,11 +1827,15 @@ class TestFunciones(AwCase):
         rx = self.aw_mod.GIT_COMMIT_RE
         for yes in ("git commit -m x", "git commit", "cd a && git commit -m y", "git -c user.name=a commit -m y",
                     "git --no-pager commit", "npm test; git commit -am z",
-                    "git add -A\ngit commit -m x", "cd a\n  git commit -m y", "(git commit -m x)", "echo $(git commit -m x)"):
+                    "git add -A\ngit commit -m x", "cd a\n  git commit -m y", "(git commit -m x)", "echo $(git commit -m x)",
+                    "sudo git commit -m x", "GIT_AUTHOR_NAME=a git commit -m x", "env A=1 B=2 git commit",
+                    'bash -c "git commit -m x"', "sh -c 'git commit'", "cd a && sudo A=1 git commit -m x"):
             self.assertTrue(rx.search(yes), yes)
         for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls",
-                   "echo hola\ngit log --grep commit"):
+                   "echo hola\ngit log --grep commit", "git commit --dry-run", "git commit -m x --dry-run",
+                   'echo "git commit -m x"', "sudo git status", "A=1 git log"):
             self.assertFalse(rx.search(no), no)
+        self.assertTrue(rx.search("git commit --dry-run; git commit -m x"))
 
     def test_merge_settings_no_modifica_el_original(self):
         existing = {"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "otro.sh"}]}]}}

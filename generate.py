@@ -89,7 +89,12 @@ AUTO_END = "<!-- aw:auto:fin -->"
 PRIO_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 TASK_RE = re.compile(r"^- \[( |x)\] (T-\d+) \[(P[0-3])\] (.*)$")
 DATE_SUFFIX_RE = re.compile(r"(\s*\((?:creada|iniciada|hecha) \d{4}-\d{2}-\d{2}\))+\s*$")
-GIT_COMMIT_RE = re.compile(r"(^|[;&|(\n]\s*)git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(\s|$)")
+# git commit al inicio de un comando: tras un separador o dentro de sh -c "...", con sudo, env o VAR=valor delante.
+# No cuenta con --dry-run (no crea ningún commit).
+GIT_COMMIT_RE = re.compile(
+    r"""(?:^|[;&|(\n]\s*|\b(?:ba|z|da)?sh\s+-[a-z]*c\s+["']\s*)"""
+    r"""(?:(?:sudo|env)\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"""
+    r"""git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(?=\s|$|["')])(?![^;&|\n]*\s--dry-run(?:\s|$|["')]))""")
 
 HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
 
@@ -106,11 +111,7 @@ def make_header(name, description):
 
 
 def read_header(filepath):
-    try:
-        with open(filepath, "r") as f:
-            lines = f.read().splitlines()
-    except (FileNotFoundError, IsADirectoryError):
-        return None, None
+    lines = read_text(filepath).splitlines()
     if not lines or lines[0].strip() != "---":
         return None, None
     name, desc = None, None
@@ -140,6 +141,8 @@ def read_text(path):
             return f.read()
     except (FileNotFoundError, IsADirectoryError):
         return ""
+    except UnicodeDecodeError:
+        raise AwError(f"El archivo no está en UTF-8: {path}. Conviértelo a UTF-8 y repite el comando.") from None
 
 
 def write_text(path, text):
@@ -351,6 +354,9 @@ def create_registry_item(folder):
     if not name:
         print("Nombre vacío, se cancela.")
         return
+    if "/" in name or "\\" in name or name.startswith("."):
+        print("Nombre inválido.")
+        return
     description = input("Descripción breve: ").strip()
     filename = name.lower().replace(" ", "_") + ".md"
     filepath = os.path.join(dirpath, filename)
@@ -401,11 +407,10 @@ def list_projects():
 def summary_line(filepath):
     if not os.path.exists(filepath):
         return "(sin datos)"
-    with open(filepath) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                return line
+    for line in read_text(filepath).splitlines():
+        line = line.strip()
+        if line:
+            return line
     return "(vacío)"
 
 
@@ -502,10 +507,7 @@ def show_project_file(relparts, empty_msg):
         return
     filepath = os.path.join(ROOT, "projects", name, *relparts)
     print(f"\n-- {'/'.join(relparts)} de {name} --\n")
-    content = ""
-    if os.path.exists(filepath):
-        with open(filepath) as f:
-            content = f.read().strip()
+    content = read_text(filepath).strip()
     print(content if content else empty_msg)
 
 
@@ -859,10 +861,16 @@ def refresh_state(project):
 
 # -- Índices derivados --
 
+def block_marks_ok(text):
+    return text.count(AUTO_START) == text.count(AUTO_END)
+
+
 def replace_block(path, body, header=None):
     # Reemplaza lo que hay entre las marcas aw:auto; el resto del archivo es del usuario.
     block = f"{AUTO_START}\n{body}\n{AUTO_END}"
     text = read_text(path)
+    if not block_marks_ok(text):
+        return  # falta una marca: no se sabe dónde termina el bloque y se podría borrar texto del usuario
     pattern = re.compile(re.escape(AUTO_START) + r".*?" + re.escape(AUTO_END), re.S)
     if pattern.search(text):
         new = pattern.sub(lambda _m: block, text)
@@ -1431,7 +1439,8 @@ def markdown_rows(text):
 # Archivos de aw que conviene no versionar en el repo git de un proyecto: son estado generado o llevan rutas
 # absolutas de esta máquina. El contenido del usuario (tasks/, decisions.md, project.md...) no está aquí.
 AW_LOCAL_FILES = (".claude/settings.json", "state.md", "context_index.json", "execution/run_log.md",
-                  "execution/run_log_archivo.md", "execution/errors.md", "tools/tool_usage.md", "tools/tool_state.json")
+                  "execution/run_log_archivo.md", "execution/errors.md", "tools/tool_usage.md", "tools/tool_state.json",
+                  "agents/assigned_agents.md", "skills/assigned_skills.md")
 
 
 def run_git(project, *args):
@@ -1485,7 +1494,8 @@ def doctor_git(project):
     if exposed:
         text = f"{len(exposed)} archivo(s) de aw no están ignorados por git y un `git add .` los incluiría: {', '.join(exposed)}."
         if any(f.startswith(".claude/settings.json") for f in exposed):
-            text += "\n.claude/settings.json lleva rutas absolutas de tu máquina; el resto es estado generado."
+            text += ("\n.claude/settings.json y las notas assigned_* llevan rutas absolutas de tu máquina; "
+                     "el resto es estado generado.")
         text += f"\nPara ignorarlos solo en local, añade estas líneas a {exposure['exclude']}:"
         text += "".join(f"\n  {pattern}" for pattern in exclude_patterns(exposure))
         text += "\ntasks/, decisions.md, project.md y el resto de tu contenido no están en la lista: versionarlos es decisión tuya."
@@ -1506,6 +1516,7 @@ def doctor_project(project):
         results.append((level, text))
 
     template = os.path.join(ROOT, "projects", "template_project")
+    fillable = set()  # archivos que aw sync rellena si están vacíos: los que la plantilla trae con contenido
     if os.path.isdir(template):
         missing = []
         for dirpath, _dirs, files in os.walk(template):
@@ -1513,6 +1524,8 @@ def doctor_project(project):
                 if ".bak-" in fname:
                     continue
                 rel = os.path.relpath(os.path.join(dirpath, fname), template).replace(os.sep, "/")
+                if os.path.getsize(os.path.join(dirpath, fname)):
+                    fillable.add(rel)
                 if not os.path.exists(pj(project, *rel.split("/"))):
                     missing.append(rel)
         if missing:
@@ -1533,7 +1546,8 @@ def doctor_project(project):
             except OSError:
                 continue  # enlace simbólico roto o archivo que desapareció
             if size == 0:
-                empty.append(rel)
+                if rel in fillable:
+                    empty.append(rel)
             elif rel.endswith(".md") and rel.split("/")[0] in ("project.md", "CLAUDE.md", "agents", "skills", "tools", "sop"):
                 fields += read_text(full).count("(completar)")
     if empty:
@@ -1559,8 +1573,14 @@ def doctor_project(project):
         add("warn", "el registro de ejecución no tiene entradas")
     else:
         last = re.match(r"- (\d{4}-\d{2}-\d{2})", entries[-1])
-        age = (datetime.date.today() - datetime.date.fromisoformat(last.group(1))).days if last else 0
-        add("warn" if age > 14 else "ok", f"última actividad registrada hace {age} día(s)")
+        try:
+            age = (datetime.date.today() - datetime.date.fromisoformat(last.group(1))).days if last else 0
+        except ValueError:
+            age = None
+        if age is None:
+            add("warn", "la última entrada del registro tiene una fecha inválida")
+        else:
+            add("warn" if age > 14 else "ok", f"última actividad registrada hace {age} día(s)")
     commits = sum(1 for e in entries if "[commit]" in e)
     if commits >= 3 and not decision_titles(project):
         add("warn", f"{commits} commit(s) registrados y ninguna decisión")
@@ -1592,6 +1612,10 @@ def doctor_project(project):
             allow = as_list(as_dict(settings.get("permissions")).get("allow"))
             need = [p for p in ("Bash(aw task *)", "Bash(aw decide *)", "Bash(aw log *)") if p not in allow]
             add("warn" if need else "ok", ("faltan permisos: " + ", ".join(need)) if need else "permisos de aw presentes")
+
+    for name in ARTIFACT_INDEX_FILES:
+        if not block_marks_ok(read_text(pj(project, "artifacts", name))):
+            add("warn", f"marcas aw:auto desparejas en artifacts/{name}: aw no lo actualiza hasta que estén las dos")
 
     for level, text in doctor_git(project):
         add(level, text)
@@ -1647,6 +1671,11 @@ def doctor(names=None):
         absent = set(list_projects()) - indexed
         global_checks.append(("warn", f"el índice de proyectos no incluye {len(absent)} proyecto(s) (aw sync)") if absent
                              else ("ok", "índice de proyectos al día"))
+    if not block_marks_ok(read_text(os.path.join(ROOT, "memory", "projects", "project_index.md"))):
+        global_checks.append(("warn", "marcas aw:auto desparejas en memory/projects/project_index.md: aw no lo actualiza hasta que estén las dos"))
+    month_log = read_text(os.path.join(ROOT, "logs", "current_month.md"))
+    if month_log.strip() and not re.match(r"# Registro de \d{4}-\d{2}", month_log):
+        global_checks.append(("warn", "logs/current_month.md no empieza con '# Registro de AAAA-MM': no rota al cambiar de mes"))
     pending = 0
     for folder in ("core", "memory"):
         base = os.path.join(ROOT, folder)
@@ -1720,33 +1749,36 @@ def main_menu():
         print(MENU)
         choice = input("Elegí una opción: ").strip()
         print()
-        if choice == "1":
-            action_new_project()
-        elif choice == "2":
-            action_list_projects()
-        elif choice == "3":
-            action_view_tasks()
-        elif choice == "4":
-            action_view_decisions()
-        elif choice == "5":
-            action_init()
-        elif choice == "6":
-            registry_menu("Agentes", "agents")
-        elif choice == "7":
-            registry_menu("Skills", "skills")
-        elif choice == "8":
-            registry_menu("Herramientas", "tools")
-        elif choice == "9":
-            action_install_command()
-        elif choice == "10":
-            action_doctor()
-        elif choice == "11":
-            action_sync()
-        elif choice == "0":
-            print("Hasta luego.")
-            break
-        else:
-            print("Opción inválida.")
+        try:
+            if choice == "1":
+                action_new_project()
+            elif choice == "2":
+                action_list_projects()
+            elif choice == "3":
+                action_view_tasks()
+            elif choice == "4":
+                action_view_decisions()
+            elif choice == "5":
+                action_init()
+            elif choice == "6":
+                registry_menu("Agentes", "agents")
+            elif choice == "7":
+                registry_menu("Skills", "skills")
+            elif choice == "8":
+                registry_menu("Herramientas", "tools")
+            elif choice == "9":
+                action_install_command()
+            elif choice == "10":
+                action_doctor()
+            elif choice == "11":
+                action_sync()
+            elif choice == "0":
+                print("Hasta luego.")
+                break
+            else:
+                print("Opción inválida.")
+        except AwError as exc:
+            print(exc)
 
 
 # -- Línea de comandos --
