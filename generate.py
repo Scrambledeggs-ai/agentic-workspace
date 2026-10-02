@@ -170,9 +170,14 @@ def as_list(value):
 
 # -- Plantillas --
 
+def sh_quote(path):
+    # Comillas dobles, como siempre, pero con \ " $ ` escapados para que el shell no los interprete.
+    return '"' + re.sub(r'([\\"$`])', r"\\\1", path) + '"'
+
+
 def machine_vars():
     script = os.path.abspath(__file__)
-    return {"ROOT": ROOT, "SCRIPT": script, "AW_CMD": f'python3 "{script}"'}
+    return {"ROOT": ROOT, "SCRIPT": script, "AW_CMD": f"python3 {sh_quote(script)}"}
 
 
 def project_vars(name, description=""):
@@ -1530,8 +1535,8 @@ def doctor_project(project):
             absent = [e for e in HOOK_EVENTS if e not in present]
             add("bad" if absent else "ok", ("faltan hooks: " + ", ".join(absent)) if absent else "hooks de aw instalados")
             for command in commands:
-                match = re.search(r'"([^"]*generate\.py)"', command)
-                if match and not os.path.exists(match.group(1)):
+                match = re.search(r'"((?:[^"\\]|\\.)*generate\.py)"', command)
+                if match and not os.path.exists(re.sub(r"\\(.)", r"\1", match.group(1))):
                     add("bad", f"un hook apunta a un script que no existe: {match.group(1)}")
                     break
             allow = as_list(as_dict(settings.get("permissions")).get("allow"))
@@ -1630,8 +1635,8 @@ def action_install_command():
     os.makedirs(bin_dir, exist_ok=True)
     wrapper_path = os.path.join(bin_dir, WRAPPER_NAME)
     script_path = os.path.abspath(__file__)
-    with open(wrapper_path, "w") as f:
-        f.write(f'#!/bin/sh\nexec python3 "{script_path}" "$@"\n')
+    # write_text reemplaza el archivo: si en ese lugar hay un enlace simbólico, no escribe a través de él.
+    write_text(wrapper_path, f'#!/bin/sh\nexec python3 {sh_quote(script_path)} "$@"\n')
     st = os.stat(wrapper_path)
     os.chmod(wrapper_path, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     print(f"Comando '{WRAPPER_NAME}' instalado en {wrapper_path}")

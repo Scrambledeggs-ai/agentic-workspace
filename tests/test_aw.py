@@ -3,6 +3,7 @@
 Cada prueba trabaja en un workspace temporal (AW_HOME) y en un TMPDIR propio,
 así que nunca toca el workspace real ni los archivos de sesión reales.
 """
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -1581,6 +1582,39 @@ class TestFunciones(AwCase):
         self.assertNotIn("A" * 40, r("clave " + "A" * 40))
         self.assertEqual(r("Could not resolve host"), "Could not resolve host")
         self.assertEqual(r("invalid token provided"), "invalid token provided")
+
+    def test_sh_quote_protege_los_caracteres_que_el_shell_interpreta(self):
+        quote = self.aw_mod.sh_quote
+        self.assertEqual(quote("/ruta con espacios/generate.py"), '"/ruta con espacios/generate.py"')
+        for path in ('/a/$HOME/generate.py', '/a/"b"/generate.py', "/a/`id`/generate.py", "/a/b\\c/it's/generate.py"):
+            result = subprocess.run(["sh", "-c", "printf %s " + quote(path)], capture_output=True, text=True)
+            self.assertEqual(result.stdout, path)
+        self.assertEqual(self.aw_mod.machine_vars()["AW_CMD"], "python3 " + quote(SCRIPT))
+
+    def test_el_instalador_no_escribe_a_traves_de_un_enlace_simbolico(self):
+        home = os.path.join(self.tmp, "home")
+        bin_dir = os.path.join(home, ".local", "bin")
+        victim = os.path.join(self.tmp, "victima.txt")
+        self.write(victim, "intacto")
+        os.makedirs(bin_dir)
+        wrapper = os.path.join(bin_dir, "aw")
+        os.symlink(victim, wrapper)
+        previous = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        try:
+            with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+                self.aw_mod.action_install_command()
+        finally:
+            if previous is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous
+        self.assertEqual(slurp(victim), "intacto")
+        self.assertFalse(os.path.islink(wrapper))
+        self.assertIn("exec python3 " + self.aw_mod.sh_quote(SCRIPT), slurp(wrapper))
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        result = subprocess.run([wrapper, "task"], capture_output=True, text=True, env=self.env)
+        self.assertIn("Uso: aw task", result.stderr)
 
     def test_redact_claves_con_prefijo_sufijo_o_comillas(self):
         r = self.aw_mod.redact
