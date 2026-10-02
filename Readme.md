@@ -109,6 +109,7 @@ Cada proyecto creado con aw lleva su estado en archivos, y Claude Code los usa a
 
 * **Al abrir una sesión**, un hook (`SessionStart`) carga un resumen: estado, tareas en curso y últimas líneas del registro.
 * **Mientras se trabaja**, otros hooks anotan solos los commits, los fallos de herramientas (sin comandos completos ni secretos), las compactaciones y el resumen de cada sesión.
+  Los commits se leen del historial de git (reflog), no del texto del comando: cuentan los commits, merges, cherry-picks y reverts hechos durante la sesión, y no un cambio de rama, un `reset` ni un `--dry-run`. Se consulta después de cada comando que menciona `git`.
 * **Lo que exige criterio** se registra con comandos de formato fijo (`aw task`, `aw decide`, `aw log`).
 * **Al terminar un turno**, si en la sesión hubo commits y no se registró ninguna decisión ni se movió ninguna tarea, un hook (`Stop`) lo avisa una sola vez. El aviso se muestra a quien usa Claude Code, no al modelo: los hooks de aw nunca bloquean el cierre del turno, así que registrar o no queda a criterio de la persona.
 * **El estado** (`state.md`) se genera solo a partir de las tareas y el registro. El archivo generado lleva una línea de marca (`<!-- aw:auto — ... -->`): mientras esa línea esté, cualquier texto agregado a mano se pierde en la siguiente regeneración. Para llevar el estado a mano hay que quitar esa línea; desde entonces aw no lo sobrescribe.

@@ -621,21 +621,99 @@ class TestHooks(AwCase):
             self.assertEqual(result.returncode, 0, event)
         self.assertEqual(self.aw("hook", cwd=project, stdin="").returncode, 0)
 
-    def test_post_tool_registra_solo_commits(self):
+    def bash(self, project, command, cwd=None):
+        return self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": command}), cwd or project)
+
+    def commit_entries(self, project):
+        return [l for l in self.read(project, "execution", "run_log.md").splitlines() if "[commit]" in l]
+
+    def test_post_tool_registra_los_commits_reales_no_los_comandos(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.hook("session-start", self.payload(project), project)
+        for command in ("git status", "git commit --dry-run -m x", "git commit --help", 'echo "git commit -m x"'):
+            self.bash(project, command)
+        self.assertEqual(self.commit_entries(project), [])
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "primer commit de prueba")
+        self.bash(project, "ls -la")  # sin git en el comando no se consulta el repositorio
+        self.assertEqual(self.commit_entries(project), [])
+        self.bash(project, "/usr/bin/git log -1")
+        self.bash(project, 'git commit -m "otra vez"')  # el mismo commit no se registra dos veces
+        entries = self.commit_entries(project)
+        self.assertEqual(len(entries), 1)
+        self.assertIn("primer commit de prueba", entries[0])
+        self.git(project, "commit", "-q", "--allow-empty", "-m", "segundo")
+        self.git(project, "commit", "-q", "--allow-empty", "-m", "tercero")
+        self.bash(project, "git commit --allow-empty -m tercero")  # dos commits en un solo comando, en orden
+        entries = self.commit_entries(project)
+        self.assertEqual(len(entries), 3)
+        self.assertIn("segundo", entries[1])
+        self.assertIn("tercero", entries[2])
+
+    def test_post_tool_cuenta_merge_cherry_pick_y_revert_pero_no_cambios_de_rama(self):
         project = self.new_project()
         self.git(project, "init", "-q")
         self.git(project, "add", ".")
-        self.git(project, "commit", "-q", "-m", "primer commit de prueba")
-        run_log = os.path.join(project, "execution", "run_log.md")
-        before = self.read(project, "execution", "run_log.md")
-        for command in ("ls -la", "git log --grep commit", "echo git commit-tree", "git status"):
-            self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": command}), project)
-        self.assertEqual(slurp(run_log), before)
-        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": 'git commit -m "x"'}), project)
-        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "cd sub && git -c user.name=a commit -m y"}), project)
-        entries = [l for l in self.read(project, "execution", "run_log.md").splitlines() if "[commit]" in l]
-        self.assertEqual(len(entries), 2)
-        self.assertIn("primer commit de prueba", entries[0])
+        past = dict(os.environ, GIT_COMMITTER_DATE="2025-01-02T10:00:00")  # el reflog toma esta fecha
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"],
+                       cwd=project, env=past, check=True)
+        main = self.git(project, "symbolic-ref", "--short", "HEAD").strip()
+        self.hook("session-start", self.payload(project), project)
+        self.git(project, "checkout", "-q", "-b", "feat/x")
+        self.write(os.path.join(project, "a.txt"), "a\n")
+        self.git(project, "add", "a.txt")
+        self.git(project, "commit", "-q", "-m", "en la rama")
+        self.git(project, "checkout", "-q", main)
+        self.git(project, "merge", "-q", "--no-ff", "-m", "une la rama", "feat/x")
+        self.git(project, "revert", "--no-edit", "-m", "1", "HEAD")
+        self.git(project, "reset", "-q", "--hard", "HEAD~1")  # deshacer no crea un commit
+        self.git(project, "checkout", "-q", "-b", "feat/y")
+        self.write(os.path.join(project, "b.txt"), "b\n")
+        self.git(project, "add", "b.txt")
+        self.git(project, "commit", "-q", "-m", "para elegir")
+        self.git(project, "checkout", "-q", main)
+        self.git(project, "cherry-pick", "feat/y")
+        self.git(project, "checkout", "-q", "feat/x")
+        self.git(project, "merge", "-q", main)  # avance directo: no crea un commit
+        self.bash(project, "g lo")  # un alias, sin la palabra git: no se consulta el repositorio
+        self.assertEqual(self.commit_entries(project), [])
+        self.bash(project, "git log")
+        entries = self.commit_entries(project)
+        self.assertEqual(len(entries), 5, entries)
+        for entry, text in zip(entries, ("en la rama", "une la rama", "Revert", "para elegir", "para elegir")):
+            self.assertIn(text, entry)
+        self.assertNotIn("base", " ".join(entries))
+
+    def test_post_tool_no_cuenta_commits_anteriores_a_la_sesion(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        past = dict(os.environ, GIT_COMMITTER_DATE="2025-01-02T10:00:00", GIT_AUTHOR_DATE="2025-01-02T10:00:00")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "viejo"],
+                       cwd=project, env=past, check=True)
+        self.hook("session-start", self.payload(project), project)
+        self.bash(project, "git commit -m viejo")
+        self.assertEqual(self.commit_entries(project), [])
+
+    def test_post_tool_sin_session_start_mira_los_ultimos_minutos(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "sin inicio")
+        self.bash(project, "git commit -m x")
+        self.bash(project, "git commit -m x")
+        self.assertEqual(len(self.commit_entries(project)), 1)
+        self.assertIn("sin inicio", self.commit_entries(project)[0])
+
+    def test_post_tool_oculta_secretos_del_mensaje_del_commit(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.hook("session-start", self.payload(project), project)
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "configura DB_PASSWORD=hunter2")
+        self.bash(project, "git commit")
+        self.assertNotIn("hunter2", self.commit_entries(project)[0])
 
     def test_tool_failure_guarda_solo_primera_linea_y_sin_secretos(self):
         project = self.new_project()
@@ -710,9 +788,9 @@ class TestHooks(AwCase):
 
     def commit_in_session(self, project):
         self.git(project, "init", "-q")
+        self.hook("session-start", self.payload(project), project)
         self.git(project, "add", ".")
         self.git(project, "commit", "-q", "-m", "c1")
-        self.hook("session-start", self.payload(project), project)
         self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m c1"}), project)
 
     def test_session_start_al_reanudar_no_repite_el_aviso(self):
@@ -2783,28 +2861,6 @@ class TestFunciones(AwCase):
         out = insert(text, "- [ ] T-003 [P1] c", "P1")
         self.assertEqual(out.splitlines(), ["# Pendientes", "<!-- x -->", "- [ ] T-001 [P0] a", "- [ ] T-003 [P1] c", "- [ ] T-002 [P2] b"])
         self.assertEqual(insert("", "- [ ] T-001 [P2] a", "P2"), "- [ ] T-001 [P2] a\n")
-
-    def test_is_git_commit(self):
-        check = self.aw_mod.is_git_commit
-        for yes in ("git commit -m x", "git commit", "cd a && git commit -m y", "git -c user.name=a commit -m y",
-                    "git --no-pager commit", "npm test; git commit -am z",
-                    "git add -A\ngit commit -m x", "cd a\n  git commit -m y", "(git commit -m x)", "echo $(git commit -m x)",
-                    "sudo git commit -m x", "GIT_AUTHOR_NAME=a git commit -m x", "env A=1 B=2 git commit",
-                    'bash -c "git commit -m x"', "sh -c 'git commit'", "cd a && sudo A=1 git commit -m x",
-                    'git commit -m "sync --dry-run compara contra la plantilla"', "git commit -m 'doc: explica --dry-run'",
-                    "bash -c \"git commit -m 'x --dry-run'\"", "git commit --dry-run; git commit -m x",
-                    "git commit --dry-run\ngit commit -m x",
-                    "git commit -m \"$(cat <<'EOF'\nAdd \"aw sync --dry-run\" docs\nEOF\n)\"",
-                    "git commit -F - <<'EOF'\nexplica --dry-run\nEOF",
-                    'git commit -m "dice \\"hola\\" y --dry-run"'):
-            self.assertTrue(check(yes), yes)
-        for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls",
-                   "echo hola\ngit log --grep commit", "git commit --dry-run", "git commit -m x --dry-run",
-                   'echo "git commit -m x"', "sudo git status", "A=1 git log", 'git commit -m "a; b" --dry-run',
-                   'bash -c "git commit --dry-run"', "git commit --dry-run && git status",
-                   'git commit --dry-run -m "x"', 'bash -c "git commit -m \\"x\\" --dry-run"',
-                   "git commit -m don\\'t --dry-run", "", None):
-            self.assertFalse(check(no), no)
 
     def test_merge_settings_no_modifica_el_original(self):
         existing = {"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "otro.sh"}]}]}}
