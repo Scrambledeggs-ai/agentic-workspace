@@ -905,6 +905,24 @@ class TestSync(AwCase):
         index = json.loads(slurp(os.path.join(self.ws, "memory", "context_index.json")))
         self.assertEqual(list(index["proyectos"]), ["demo"])
 
+    def test_sync_y_doctor_siguen_con_un_enlace_simbolico_roto(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        os.makedirs(os.path.join(project, "lib", "bin"))
+        os.symlink(os.path.join(self.tmp, "no-existe"), os.path.join(project, "lib", "bin", "roto"))
+        os.symlink(os.path.join(self.tmp, "no-existe.md"), os.path.join(project, "sop", "roto.md"))
+        self.write(os.path.join(project, "lib", "real.txt"), "x")
+        sync = self.aw("sync")
+        self.assertEqual(sync.returncode, 0, sync.stderr)
+        self.assertIn("- b:", sync.stdout)
+        files = json.loads(self.read(project, "context_index.json"))["archivos"]
+        self.assertIn("lib/real.txt", files)
+        self.assertNotIn("lib/bin/roto", files)
+        doctor = self.aw("doctor")
+        self.assertNotIn("Traceback", doctor.stderr)
+        self.assertIn("Proyecto b", doctor.stdout)
+        self.assertIn("Resumen:", doctor.stdout)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")

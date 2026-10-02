@@ -896,8 +896,12 @@ def refresh_context_index(project):
                 continue
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, project).replace(os.sep, "/")
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full)).strftime("%Y-%m-%d %H:%M")
-            files[rel] = {"bytes": os.path.getsize(full), "modificado": mtime}
+            try:
+                info = os.stat(full)
+            except OSError:
+                continue  # enlace simbólico roto o archivo que desapareció: no se indexa
+            mtime = datetime.datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M")
+            files[rel] = {"bytes": info.st_size, "modificado": mtime}
     path = pj(project, "context_index.json")
     try:
         current = json.loads(read_text(path) or "{}")
@@ -1443,7 +1447,11 @@ def doctor_project(project):
         for fname in files:
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, project).replace(os.sep, "/")
-            if os.path.getsize(full) == 0:
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                continue  # enlace simbólico roto o archivo que desapareció
+            if size == 0:
                 empty.append(rel)
             elif rel.endswith(".md") and rel.split("/")[0] in ("project.md", "CLAUDE.md", "agents", "skills", "tools", "sop"):
                 fields += read_text(full).count("(completar)")
