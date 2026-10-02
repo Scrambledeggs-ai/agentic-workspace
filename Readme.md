@@ -119,6 +119,30 @@ Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea d
 | `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes). Si un proyecto es un repo git y `sync` le añadió archivos de aw sin ignorar, lo avisa |
 | `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos, referencias a agentes, skills y herramientas, y, si el proyecto está en un repo git, qué archivos de aw no están ignorados (un `git add .` los incluiría) o ya están versionados, con las líneas para ignorarlos solo en local (`.git/info/exclude`) |
 
+### Migrar un proyecto que ya existe
+
+Mueve la carpeta a `projects/` y sincronízala por su nombre:
+
+```bash
+aw sync NOMBRE --dry-run
+```
+
+```bash
+aw sync NOMBRE
+```
+
+```bash
+aw doctor NOMBRE
+```
+
+`aw sync` crea solo lo que falta y nunca reemplaza un archivo que ya tiene contenido: si el proyecto trae su propio `CLAUDE.md`, `memory.md` o archivos en `.claude/`, quedan como estaban. La única excepción es un `.claude/settings.json` que ya exista: aw le agrega sus hooks y permisos y guarda un respaldo al lado. Al convertir la carpeta en proyecto, además:
+
+* escribe `MIGRACION.md` en la raíz, con el estado inicial de la carpeta y la lista de los archivos que creó;
+* deja una entrada en el registro de ejecución;
+* pone en `project.md` una fecha de inicio estimada: la del primer commit o, si no hay git, la del archivo más antiguo. Conviene revisarla.
+
+Si el proyecto es un repositorio git, `aw doctor NOMBRE` da las líneas para que git ignore lo que agregó aw, ahora o cuando se cree el repositorio. Las da archivo por archivo, sin carpetas enteras, para que lo que se agregue después en `artifacts/` o `tasks/` siga a la vista de git.
+
 La plantilla de proyectos (`projects/template_project`) solo lleva archivos `.md` y `.json`: son los únicos que aw interpreta. Cualquier otro archivo que se ponga ahí se ignora, tanto al crear un proyecto como al sincronizar.
 
 Los comandos de tareas, decisiones y notas actúan sobre el proyecto de la carpeta actual (o el indicado con `--project`) y solo escriben dentro de él. Desde dentro de un proyecto, `--project` no permite escribir en otro: para eso hay que ejecutar el comando desde ese proyecto o desde fuera de un proyecto.

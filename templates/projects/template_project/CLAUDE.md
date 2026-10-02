@@ -1,5 +1,5 @@
 # CLAUDE.md — @@PROJECT@@
-<!-- Se carga solo al trabajar en este proyecto. No repetir lo del CLAUDE.md global ni el protocolo aw (ver @@ROOT@@/CLAUDE.md). Completar solo lo específico de este proyecto. -->
+<!-- Se carga solo al trabajar en este proyecto. No repetir lo del CLAUDE.md global ni el protocolo aw (está en el CLAUDE.md del workspace). Completar solo lo específico de este proyecto. -->
 
 ## Qué es este proyecto
 Ver @project.md
