@@ -232,7 +232,7 @@ def template_content(relpath, variables):
     path = os.path.join(TEMPLATES_DIR, *relpath.split("/"))
     if not os.path.isfile(path):
         return None
-    return render(read_text(path), variables, json_safe=relpath.endswith(".json"))
+    return render(read_text(path), variables, json_safe=relpath.lower().endswith(".json"))
 
 
 WS_MARK_RE = re.compile(r"<!-- aw:plantilla sha256=([0-9a-f]{64}) -->\n?\Z")
@@ -448,7 +448,7 @@ def render_tree(root_dir, variables):
                 continue
             fpath = os.path.join(dirpath, fname)
             text = read_text(fpath)
-            new = render(text, variables, json_safe=fname.endswith(".json"))
+            new = render(text, variables, json_safe=fname.lower().endswith(".json"))
             if new != text:
                 write_text(fpath, new)
 
@@ -1446,7 +1446,7 @@ def sync_project(project, sources, dry_run=False):
             continue
         changes.append((action, rel))
         if not dry_run:
-            write_text(dest, render(source_text, variables, json_safe=rel.endswith(".json")))
+            write_text(dest, render(source_text, variables, json_safe=rel.lower().endswith(".json")))
     if not dry_run:
         refresh_state(project)
         refresh_artifact_indexes(project)
@@ -1721,10 +1721,13 @@ def doctor_project(project):
             if not name or name == "(completar)":
                 continue
             target = os.path.expanduser(name)
+            inside = True
             if not os.path.isabs(target):
+                base = os.path.join(ROOT, folder)
                 relative = target[len(folder) + 1:] if target.startswith(folder + "/") else target
-                target = os.path.join(ROOT, folder, relative)
-            if not os.path.exists(target):
+                target = os.path.normpath(os.path.join(base, relative))
+                inside = target.startswith(base + os.sep)  # un archivo dentro de la carpeta, no la carpeta ni otra
+            if not inside or not os.path.exists(target):
                 add("bad", f"{label} asignados: no existe {name} (fila '{cells[0]}')")
 
     mcp_names = set()

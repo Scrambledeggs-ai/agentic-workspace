@@ -1267,8 +1267,12 @@ class TestSync(AwCase):
         self.write(os.path.join(template, "sop", "GUIA.MD"), "Guía de @@PROJECT@@\n")
         self.assertIn("crear: sop/GUIA.MD", self.aw("sync").stdout)
         self.assertEqual(self.read(project, "sop", "GUIA.MD"), "Guía de demo\n")
-        self.aw("project", "new", "tercero")
+        self.write(os.path.join(template, "sop", "meta.JSON"), '{"proyecto": "@@PROJECT@@", "desc": "@@DESCRIPTION@@"}\n')
+        self.aw("project", "new", "tercero", "--desc", 'dice "hola"')
         self.assertEqual(self.read(self.project("tercero"), "sop", "GUIA.MD"), "Guía de tercero\n")
+        self.assertEqual(json.loads(self.read(self.project("tercero"), "sop", "meta.JSON"))["desc"], 'dice "hola"')
+        self.aw("sync")
+        self.assertEqual(json.loads(self.read(project, "sop", "meta.JSON"))["proyecto"], "demo")
         # Un .md de la plantilla mal codificado sí es asunto de aw: error claro con su nombre.
         bad = os.path.join(template, "sop", "rules.md")
         with open(bad, "wb") as f:
@@ -1397,11 +1401,13 @@ class TestDoctor(AwCase):
         self.write(os.path.join(project, "agents", "assigned_agents.md"),
                    "# Agentes\n\n| Tarea | Agente (archivo) | Notas |\n|---|---|---|\n"
                    "| Falta | `agents/no_existe.md` | |\n| Fuera | ../../no_existe.md | |\n"
-                   "| Raíz | CLAUDE.md | |\n| Otra carpeta | core/config.md | |\n| De skills | skills/auditor.skill | |\n")
+                   "| Raíz | CLAUDE.md | |\n| Otra carpeta | core/config.md | |\n| De skills | skills/auditor.skill | |\n"
+                   "| Solo carpeta | agents/ | |\n| Sale | agents/../CLAUDE.md | |\n")
         result = self.aw("doctor")
         self.assertEqual(result.returncode, 1)
         for cell, row in (("agents/no_existe.md", "Falta"), ("../../no_existe.md", "Fuera"), ("CLAUDE.md", "Raíz"),
-                          ("core/config.md", "Otra carpeta"), ("skills/auditor.skill", "De skills")):
+                          ("core/config.md", "Otra carpeta"), ("skills/auditor.skill", "De skills"),
+                          ("agents/", "Solo carpeta"), ("agents/../CLAUDE.md", "Sale")):
             self.assertIn(f"✕ agentes asignados: no existe {cell} (fila '{row}')", result.stdout)
 
     def test_compara_herramientas_con_mcp_json(self):
