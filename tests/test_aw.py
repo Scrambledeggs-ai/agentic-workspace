@@ -1203,6 +1203,44 @@ class TestDoctor(AwCase):
         self.assertEqual(missing.returncode, 1)
         self.assertIn("✕ no existe", missing.stdout)
 
+    def test_doctor_solo_cuenta_los_vacios_que_sync_puede_rellenar(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "src", "__init__.py"), "")
+        self.write(os.path.join(project, "notas.md"), "")
+        self.assertIn("✓ ningún archivo vacío", self.aw("doctor").stdout)
+        self.write(os.path.join(project, "sop", "rules.md"), "")
+        self.assertIn("1 archivo(s) vacío(s) (aw sync los rellena): sop/rules.md", self.aw("doctor").stdout)
+
+    def test_bloque_automatico_con_marcas_desparejas_no_se_toca_y_doctor_avisa(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "artifacts", "informe.html"), "<html></html>")
+        path = os.path.join(project, "artifacts", "outputs.md")
+        text = "# Entregables\n\n<!-- aw:auto:inicio -->\nviejo\n\nmi texto importante\n"  # se borró la marca de fin
+        self.write(path, text)
+        self.aw("sync")
+        self.aw("sync")
+        self.assertEqual(slurp(path), text)
+        self.assertIn("▲ marcas aw:auto desparejas en artifacts/outputs.md", self.aw("doctor").stdout)
+        self.write(path, text + "<!-- aw:auto:fin -->\n")
+        self.aw("sync")
+        self.assertIn("- `artifacts/informe.html`", slurp(path))
+        self.assertNotIn("desparejas", self.aw("doctor").stdout)
+
+    def test_doctor_avisa_si_el_registro_mensual_no_tiene_cabecera(self):
+        self.new_project()
+        self.assertNotIn("current_month.md", self.aw("doctor").stdout)
+        self.write(os.path.join(self.ws, "logs", "current_month.md"), "notas mías\n- 2026-01-01 10:00 demo — algo\n")
+        self.assertIn("▲ logs/current_month.md no empieza con '# Registro de AAAA-MM'", self.aw("doctor").stdout)
+
+    def test_doctor_avisa_de_las_notas_de_asignacion_sin_ignorar(self):
+        project = self.new_project("uno")
+        self.git(project, "init", "-q")
+        out = self.aw("doctor", "uno").stdout
+        patterns = self.apply_exclude_suggestions(out, os.path.join(project, ".git", "info", "exclude"))
+        self.assertIn("/agents/assigned_agents.md", patterns)
+        self.assertIn("/skills/assigned_skills.md", patterns)
+        self.assertIn("✓ archivos de aw ignorados por git", self.aw("doctor", "uno").stdout)
+
     def test_doctor_no_se_cae_con_una_fecha_invalida_en_el_registro(self):
         project = self.new_project()
         with open(os.path.join(project, "execution", "run_log.md"), "a", encoding="utf-8") as f:

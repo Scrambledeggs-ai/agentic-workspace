@@ -856,10 +856,16 @@ def refresh_state(project):
 
 # -- Índices derivados --
 
+def block_marks_ok(text):
+    return text.count(AUTO_START) == text.count(AUTO_END)
+
+
 def replace_block(path, body, header=None):
     # Reemplaza lo que hay entre las marcas aw:auto; el resto del archivo es del usuario.
     block = f"{AUTO_START}\n{body}\n{AUTO_END}"
     text = read_text(path)
+    if not block_marks_ok(text):
+        return  # falta una marca: no se sabe dónde termina el bloque y se podría borrar texto del usuario
     pattern = re.compile(re.escape(AUTO_START) + r".*?" + re.escape(AUTO_END), re.S)
     if pattern.search(text):
         new = pattern.sub(lambda _m: block, text)
@@ -1428,7 +1434,8 @@ def markdown_rows(text):
 # Archivos de aw que conviene no versionar en el repo git de un proyecto: son estado generado o llevan rutas
 # absolutas de esta máquina. El contenido del usuario (tasks/, decisions.md, project.md...) no está aquí.
 AW_LOCAL_FILES = (".claude/settings.json", "state.md", "context_index.json", "execution/run_log.md",
-                  "execution/run_log_archivo.md", "execution/errors.md", "tools/tool_usage.md", "tools/tool_state.json")
+                  "execution/run_log_archivo.md", "execution/errors.md", "tools/tool_usage.md", "tools/tool_state.json",
+                  "agents/assigned_agents.md", "skills/assigned_skills.md")
 
 
 def run_git(project, *args):
@@ -1482,7 +1489,8 @@ def doctor_git(project):
     if exposed:
         text = f"{len(exposed)} archivo(s) de aw no están ignorados por git y un `git add .` los incluiría: {', '.join(exposed)}."
         if any(f.startswith(".claude/settings.json") for f in exposed):
-            text += "\n.claude/settings.json lleva rutas absolutas de tu máquina; el resto es estado generado."
+            text += ("\n.claude/settings.json y las notas assigned_* llevan rutas absolutas de tu máquina; "
+                     "el resto es estado generado.")
         text += f"\nPara ignorarlos solo en local, añade estas líneas a {exposure['exclude']}:"
         text += "".join(f"\n  {pattern}" for pattern in exclude_patterns(exposure))
         text += "\ntasks/, decisions.md, project.md y el resto de tu contenido no están en la lista: versionarlos es decisión tuya."
@@ -1503,6 +1511,7 @@ def doctor_project(project):
         results.append((level, text))
 
     template = os.path.join(ROOT, "projects", "template_project")
+    fillable = set()  # archivos que aw sync rellena si están vacíos: los que la plantilla trae con contenido
     if os.path.isdir(template):
         missing = []
         for dirpath, _dirs, files in os.walk(template):
@@ -1510,6 +1519,8 @@ def doctor_project(project):
                 if ".bak-" in fname:
                     continue
                 rel = os.path.relpath(os.path.join(dirpath, fname), template).replace(os.sep, "/")
+                if os.path.getsize(os.path.join(dirpath, fname)):
+                    fillable.add(rel)
                 if not os.path.exists(pj(project, *rel.split("/"))):
                     missing.append(rel)
         if missing:
@@ -1530,7 +1541,8 @@ def doctor_project(project):
             except OSError:
                 continue  # enlace simbólico roto o archivo que desapareció
             if size == 0:
-                empty.append(rel)
+                if rel in fillable:
+                    empty.append(rel)
             elif rel.endswith(".md") and rel.split("/")[0] in ("project.md", "CLAUDE.md", "agents", "skills", "tools", "sop"):
                 fields += read_text(full).count("(completar)")
     if empty:
@@ -1596,6 +1608,10 @@ def doctor_project(project):
             need = [p for p in ("Bash(aw task *)", "Bash(aw decide *)", "Bash(aw log *)") if p not in allow]
             add("warn" if need else "ok", ("faltan permisos: " + ", ".join(need)) if need else "permisos de aw presentes")
 
+    for name in ARTIFACT_INDEX_FILES:
+        if not block_marks_ok(read_text(pj(project, "artifacts", name))):
+            add("warn", f"marcas aw:auto desparejas en artifacts/{name}: aw no lo actualiza hasta que estén las dos")
+
     for level, text in doctor_git(project):
         add(level, text)
 
@@ -1650,6 +1666,11 @@ def doctor(names=None):
         absent = set(list_projects()) - indexed
         global_checks.append(("warn", f"el índice de proyectos no incluye {len(absent)} proyecto(s) (aw sync)") if absent
                              else ("ok", "índice de proyectos al día"))
+    if not block_marks_ok(read_text(os.path.join(ROOT, "memory", "projects", "project_index.md"))):
+        global_checks.append(("warn", "marcas aw:auto desparejas en memory/projects/project_index.md: aw no lo actualiza hasta que estén las dos"))
+    month_log = read_text(os.path.join(ROOT, "logs", "current_month.md"))
+    if month_log.strip() and not re.match(r"# Registro de \d{4}-\d{2}", month_log):
+        global_checks.append(("warn", "logs/current_month.md no empieza con '# Registro de AAAA-MM': no rota al cambiar de mes"))
     pending = 0
     for folder in ("core", "memory"):
         base = os.path.join(ROOT, folder)
