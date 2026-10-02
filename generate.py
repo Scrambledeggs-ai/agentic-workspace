@@ -1761,6 +1761,8 @@ def dispatch(args):
         target = create_project(args.name, args.desc)
         print(f"Proyecto creado: {target}")
     elif args.cmd == "task":
+        if not args.tcmd:  # sin subcomando, args no trae --project
+            raise AwError("Uso: aw task add|start|done|list")
         project = resolve_project(args.project)
         if args.tcmd == "add":
             task_id, prio = task_add(project, " ".join(args.title), args.prio)

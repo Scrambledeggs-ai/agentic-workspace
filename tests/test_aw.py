@@ -302,6 +302,13 @@ class TestTareas(AwCase):
         self.assertIn("ya está hecha", self.aw("task", "done", "T-001", cwd=project).stderr)
         self.assertIn("ya está hecha", self.aw("task", "start", "T-001", cwd=project).stderr)
 
+    def test_task_sin_subcomando_muestra_el_uso(self):
+        project = self.new_project()
+        for cwd in (project, self.tmp):
+            result = self.aw("task", cwd=cwd)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stderr.strip(), "Uso: aw task add|start|done|list")
+
     def test_los_ids_no_se_reutilizan(self):
         project = self.new_project()
         self.aw("task", "add", "uno", cwd=project)
