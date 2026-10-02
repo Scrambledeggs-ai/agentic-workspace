@@ -159,6 +159,15 @@ def append_text(path, text):
         f.write(text)
 
 
+def as_dict(value):
+    # Un JSON editado a mano puede ser válido y traer otro tipo donde se espera un objeto o una lista.
+    return value if isinstance(value, dict) else {}
+
+
+def as_list(value):
+    return value if isinstance(value, list) else []
+
+
 # -- Plantillas --
 
 def machine_vars():
@@ -917,6 +926,7 @@ def refresh_context_index(project):
         current = json.loads(read_text(path) or "{}")
     except ValueError:
         current = {}
+    current = as_dict(current)
     if current.get("archivos") == files and current.get("proyecto") == os.path.basename(project):
         return
     data = {"proyecto": os.path.basename(project), "actualizado": now_str(), "archivos": files}
@@ -1221,7 +1231,7 @@ def merge_settings(existing, template):
                 if not isinstance(current, list):
                     continue
                 installed = [h for g in current if isinstance(g, dict)
-                             for h in (g.get("hooks") or []) if isinstance(h, dict)]
+                             for h in as_list(g.get("hooks")) if isinstance(h, dict)]
                 for group in groups:
                     wanted = [h for h in group.get("hooks", []) if hook_key(h)]
                     keys = {hook_key(h) for h in wanted}
@@ -1250,6 +1260,8 @@ def sync_settings(project, source_text, variables, dry_run):
         existing = json.loads(read_text(dest) or "{}")
     except ValueError:
         return [("omitir", ".claude/settings.json (JSON inválido; no se toca)")]
+    if not isinstance(existing, dict):
+        return [("omitir", ".claude/settings.json (no es un objeto JSON; no se toca)")]
     merged, notes = merge_settings(existing, template)
     if not notes:
         return []
@@ -1499,13 +1511,16 @@ def doctor_project(project):
     else:
         try:
             settings = json.loads(read_text(settings_path))
+            if not isinstance(settings, dict):
+                settings = None
+                add("bad", ".claude/settings.json no es un objeto JSON")
         except ValueError:
             settings = None
             add("bad", ".claude/settings.json tiene JSON inválido")
         if settings is not None:
-            hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
-            commands = [h.get("command", "") for groups in hooks.values() if isinstance(groups, list)
-                        for g in groups if isinstance(g, dict) for h in g.get("hooks", []) if isinstance(h, dict)]
+            hooks = as_dict(settings.get("hooks"))
+            commands = [str(h.get("command") or "") for groups in hooks.values() if isinstance(groups, list)
+                        for g in groups if isinstance(g, dict) for h in as_list(g.get("hooks")) if isinstance(h, dict)]
             present = {hook_signature(c) for c in commands}
             absent = [e for e in HOOK_EVENTS if e not in present]
             add("bad" if absent else "ok", ("faltan hooks: " + ", ".join(absent)) if absent else "hooks de aw instalados")
@@ -1514,7 +1529,7 @@ def doctor_project(project):
                 if match and not os.path.exists(match.group(1)):
                     add("bad", f"un hook apunta a un script que no existe: {match.group(1)}")
                     break
-            allow = (settings.get("permissions") or {}).get("allow") or []
+            allow = as_list(as_dict(settings.get("permissions")).get("allow"))
             need = [p for p in ("Bash(aw task *)", "Bash(aw decide *)", "Bash(aw log *)") if p not in allow]
             add("warn" if need else "ok", ("faltan permisos: " + ", ".join(need)) if need else "permisos de aw presentes")
 
@@ -1537,7 +1552,7 @@ def doctor_project(project):
     mcp_names = set()
     try:
         mcp = json.loads(read_text(pj(project, ".mcp.json")) or "{}")
-        mcp_names = {k.lower() for k in (mcp.get("mcpServers") or {})}
+        mcp_names = {k.lower() for k in as_dict(as_dict(mcp).get("mcpServers"))}
     except ValueError:
         pass
     for cells in markdown_rows(read_text(pj(project, "tools", "assigned_tools.md"))):
@@ -1563,7 +1578,7 @@ def doctor(names=None):
         global_checks.append(("warn", "el CLAUDE.md de la raíz no es el del workspace aw: aw no lo gestiona "
                                       "(si es una versión antigua, renómbralo y ejecuta aw init)"))
     try:
-        indexed = set(json.loads(read_text(os.path.join(ROOT, "memory", "context_index.json")) or "{}").get("proyectos") or {})
+        indexed = set(as_dict(json.loads(read_text(os.path.join(ROOT, "memory", "context_index.json")) or "{}").get("proyectos")))
     except (ValueError, AttributeError):
         indexed = None
     if indexed is None:

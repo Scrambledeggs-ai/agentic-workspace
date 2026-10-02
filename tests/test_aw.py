@@ -934,6 +934,26 @@ class TestSync(AwCase):
             self.assertNotIn("demo", result.stdout)
         self.assertEqual(self.snapshot(template), before)
 
+    def test_sync_con_json_valido_de_otro_tipo_no_se_cae(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        settings = os.path.join(project, ".claude", "settings.json")
+        self.write(os.path.join(project, "context_index.json"), "[]")
+        for text in ("[]", "null", '"texto"'):
+            self.write(settings, text)
+            result = self.aw("sync")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no es un objeto JSON", result.stdout)
+            self.assertIn("- b:", result.stdout)
+            self.assertEqual(slurp(settings), text)
+        self.assertEqual(json.loads(self.read(project, "context_index.json"))["proyecto"], "a")
+        for data in ({"permissions": [], "hooks": []}, {"hooks": {"Stop": [{"hooks": 5}], "SessionEnd": 5}},
+                     {"permissions": {"allow": 5}}):
+            self.write(settings, json.dumps(data))
+            result = self.aw("sync")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("- b:", result.stdout)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")
@@ -970,6 +990,40 @@ class TestDoctor(AwCase):
         self.assertIn("JSON inválido", self.aw("doctor").stdout)
         os.remove(path)
         self.assertIn("✕ .claude/settings.json no existe", self.aw("doctor").stdout)
+
+    def test_doctor_con_json_valido_de_otro_tipo_no_se_cae(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        settings = os.path.join(project, ".claude", "settings.json")
+        good = slurp(settings)
+        for text in ("[]", "null", '"texto"'):
+            self.write(settings, text)
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("✕ .claude/settings.json no es un objeto JSON", result.stdout)
+            self.assertIn("Proyecto b", result.stdout)
+        for data in ({"permissions": [], "hooks": []}, {"hooks": {"Stop": [{"hooks": 5}], "SessionEnd": 5}},
+                     {"permissions": {"allow": 5}, "hooks": {"Stop": [{"hooks": [{"command": 5}]}]}}):
+            self.write(settings, json.dumps(data))
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("✕ faltan hooks", result.stdout)
+            self.assertIn("Proyecto b", result.stdout)
+        self.write(settings, good)
+        self.write(os.path.join(project, "tools", "assigned_tools.md"),
+                   "# Herramientas\n\n| Herramienta | Uso | Config |\n|---|---|---|\n| Airtable | tablas | .mcp.json |\n")
+        for text in ("[]", "null", '{"mcpServers": [1]}', '{"mcpServers": 5}'):
+            self.write(os.path.join(project, ".mcp.json"), text)
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("herramienta 'Airtable' declarada en .mcp.json pero no figura ahí", result.stdout)
+        index = os.path.join(self.ws, "memory", "context_index.json")
+        for text, expected in (("[]", "memory/context_index.json es inválido"),
+                               ('{"proyectos": [{}]}', "el índice de proyectos no incluye 2 proyecto(s)")):
+            self.write(index, text)
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(expected, result.stdout)
 
     def test_detecta_estado_manual_y_permisos_faltantes(self):
         project = self.new_project()
