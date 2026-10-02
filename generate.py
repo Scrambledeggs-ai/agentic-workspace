@@ -1971,7 +1971,10 @@ def dispatch(args):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
-        main_menu()
+        try:
+            main_menu()
+        except (EOFError, KeyboardInterrupt):
+            print("\nHasta luego.")  # Ctrl-D, Ctrl-C o entrada sin terminal: se sale como con la opción 0
         return 0
     if argv[0] == "hook":
         return run_hook(argv[1] if len(argv) > 1 else "")

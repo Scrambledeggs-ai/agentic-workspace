@@ -257,6 +257,25 @@ class TestEstructura(AwCase):
         agents = self.aw(stdin="6\na\nc\n0\n")
         self.assertIn("Coding Agent", agents.stdout)
 
+    def test_el_menu_sale_sin_traza_si_se_corta_la_entrada(self):
+        self.new_project()
+        # Sin terminal o con Ctrl-D la entrada se acaba: en el menú, en un submenú o a mitad de una pregunta.
+        for stdin in ("", "6\n", "1\n", "1\ndemo2\n", "3\n", "11\n"):
+            result = self.aw(stdin=stdin)
+            self.assertEqual(result.returncode, 0, repr(stdin))
+            self.assertNotIn("Traceback", result.stderr, repr(stdin))
+            self.assertEqual(result.stderr, "", repr(stdin))
+            self.assertTrue(result.stdout.rstrip().endswith("Hasta luego."), repr(stdin))
+        self.assertFalse(os.path.exists(self.project("demo2")))
+        aw = load_aw(self.ws)
+
+        def ctrl_c(_prompt=""):
+            raise KeyboardInterrupt
+
+        aw.input = ctrl_c
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            self.assertEqual(aw.main([]), 0)
+
     def test_el_menu_no_crea_agentes_skills_ni_herramientas_fuera_de_su_carpeta(self):
         self.init()
         agents = os.path.join(self.ws, "agents")
