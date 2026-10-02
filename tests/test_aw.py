@@ -912,6 +912,17 @@ class TestSync(AwCase):
         index = json.loads(slurp(os.path.join(self.ws, "memory", "context_index.json")))
         self.assertEqual(list(index["proyectos"]), ["demo"])
 
+    def test_sync_y_doctor_no_recorren_las_dependencias_del_proyecto(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "src", "app.js"), "x")
+        self.write(os.path.join(project, "node_modules", "paquete", "index.js"), "")
+        self.write(os.path.join(project, "src", "__pycache__", "app.pyc"), "")
+        self.aw("sync")
+        files = json.loads(self.read(project, "context_index.json"))["archivos"]
+        self.assertIn("src/app.js", files)
+        self.assertEqual([f for f in files if "node_modules" in f or "__pycache__" in f], [])
+        self.assertIn("✓ ningún archivo vacío", self.aw("doctor").stdout)
+
     def test_sync_y_doctor_siguen_con_un_enlace_simbolico_roto(self):
         project = self.new_project("a")
         self.aw("project", "new", "b")

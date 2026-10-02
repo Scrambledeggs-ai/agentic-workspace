@@ -377,8 +377,10 @@ def registry_menu(label, folder):
 
 # -- Proyectos --
 
-# Carpetas de projects/ que nunca son un proyecto: la plantilla y las que dejan las herramientas de desarrollo.
-NOT_PROJECTS = {"template_project", "node_modules", "__pycache__"}
+# Carpetas que dejan las herramientas de desarrollo: no son proyectos ni se recorren dentro de uno.
+HEAVY_DIRS = {"node_modules", "__pycache__"}
+# Carpetas de projects/ que nunca son un proyecto.
+NOT_PROJECTS = {"template_project"} | HEAVY_DIRS
 
 
 def list_projects():
@@ -909,7 +911,7 @@ def refresh_artifact_indexes(project):
 def refresh_context_index(project):
     files = {}
     for dirpath, dirs, fnames in os.walk(project):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in HEAVY_DIRS)
         for fname in sorted(fnames):
             if fname == "context_index.json" or fname.endswith(".tmp") or fname.startswith(".") or ".bak-" in fname:
                 continue
@@ -1464,7 +1466,7 @@ def doctor_project(project):
 
     empty, fields = [], 0
     for dirpath, dirs, files in os.walk(project):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in HEAVY_DIRS]
         for fname in files:
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, project).replace(os.sep, "/")
