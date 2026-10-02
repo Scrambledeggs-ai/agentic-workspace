@@ -281,20 +281,30 @@ class TestEstructura(AwCase):
         with open(os.path.join(self.ws, "agents", "diseño.md"), "rb") as f:
             self.assertIn("Diseño".encode("utf-8"), f.read())
 
-    def test_un_entorno_virtual_sin_punto_dentro_del_proyecto_no_se_indexa(self):
+    def test_un_entorno_virtual_sin_punto_no_es_proyecto_ni_se_indexa(self):
         project = self.new_project()
         self.write(os.path.join(project, "venv", "lib", "modulo.py"), "x")
+        self.write(os.path.join(self.project("venv"), "lib", "modulo.py"), "x")
         self.aw("sync")
+        self.assertEqual(load_aw(self.ws).list_projects(), ["demo"])
         files = json.loads(self.read(project, "context_index.json"))["archivos"]
         self.assertEqual([f for f in files if f.startswith("venv/")], [])
 
     def test_no_se_crean_proyectos_con_nombres_que_aw_ignora(self):
-        self.init()
-        for name in ("node_modules", "__pycache__", "template_project"):
+        self.new_project()
+        for name in ("node_modules", "__pycache__", "venv", "template_project"):
             result = self.aw("project", "new", name)
             self.assertEqual(result.returncode, 2, name)
             self.assertIn("Nombre de proyecto inválido", result.stderr)
         self.assertFalse(os.path.exists(self.project("node_modules")))
+        # Tampoco se tratan como proyecto aunque la carpeta exista y se nombre de forma explícita.
+        for name in ("node_modules", "__pycache__", "venv"):
+            self.write(os.path.join(self.project(name), "paquete", "index.js"), "x")
+            for args in (("sync", name), ("doctor", name), ("task", "add", "x", "--project", name)):
+                result = self.aw(*args)
+                self.assertEqual(result.returncode, 2, args)
+                self.assertIn("Nombre de proyecto inválido", result.stderr)
+            self.assertEqual(os.listdir(self.project(name)), ["paquete"])
 
     def test_un_archivo_que_no_es_utf8_da_un_error_claro(self):
         project = self.new_project()
@@ -592,10 +602,21 @@ class TestHooks(AwCase):
             self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": command}), project)
         self.assertEqual(slurp(run_log), before)
         self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": 'git commit -m "x"'}), project)
-        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "cd sub && git -c user.name=a commit -m y"}), project)
+        entries = [l for l in self.read(project, "execution", "run_log.md").splitlines() if "[commit]" in l]
+        self.assertEqual(len(entries), 1)
+        self.assertIn("primer commit de prueba", entries[0])
+        # Un comando que parece un commit pero no creó ninguno (HEAD no cambió) no se registra otra vez.
+        for command in ('bash -c "git commit -m \\"x\\" --dry-run"', "cat > notas.md <<'EOF'\ngit commit -m x\nEOF",
+                        "cd sub && git -c user.name=a commit -m y"):
+            self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": command}), project)
+        self.assertEqual(len([l for l in self.read(project, "execution", "run_log.md").splitlines() if "[commit]" in l]), 1)
+        self.assertEqual(slurp(os.path.join(self.sessions, "aw-s1.events")).count("C\n"), 1)
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "segundo commit")
+        self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m y"}), project)
         entries = [l for l in self.read(project, "execution", "run_log.md").splitlines() if "[commit]" in l]
         self.assertEqual(len(entries), 2)
-        self.assertIn("primer commit de prueba", entries[0])
+        self.assertIn("segundo commit", entries[1])
 
     def test_tool_failure_guarda_solo_primera_linea_y_sin_secretos(self):
         project = self.new_project()
@@ -854,8 +875,7 @@ class TestSync(AwCase):
         self.assertEqual(self.snapshot(self.ws), snapshot)
         self.assertEqual(os.listdir(self.sessions), [])
         real = self.aw("sync")
-        changes = [line for line in dry.stdout.splitlines() if line.startswith("    ")]
-        self.assertEqual(changes, [line for line in real.stdout.splitlines() if line.startswith("    ")])
+        self.assertEqual(self.changes(dry.stdout), self.changes(real.stdout))
         self.assertTrue(os.path.isfile(os.path.join(project, rel)))
 
     def snapshot(self, project):
@@ -1148,6 +1168,30 @@ class TestSync(AwCase):
         self.assertEqual(sorted(os.listdir(outside)), ["carpeta", "compartido.md"])
         self.assertEqual(os.listdir(os.path.join(outside, "carpeta")), [])
         self.assertIn("crear: sop/extra.md", dry.stdout)  # el enlace relativo se resuelve como en la sincronización real
+
+    def changes(self, output):
+        return [line for line in output.splitlines() if line.startswith("    ")]
+
+    def test_enlaces_raros_en_la_plantilla_no_detienen_sync_y_el_modo_prueba_coincide(self):
+        project = self.new_project()
+        template = self.project("template_project")
+        shared = os.path.join(self.tmp, "compartida")
+        self.write(os.path.join(shared, "nuevo.md"), "contenido\n")
+        os.symlink(shared, os.path.join(template, "sop", "compartida"))               # enlace a una carpeta
+        os.symlink("bucle.md", os.path.join(template, "sop", "bucle.md"))             # enlace a sí mismo
+        os.remove(os.path.join(template, "sop", "rules.md"))
+        os.symlink(os.path.join(self.tmp, "no", "existe", "rules.md"), os.path.join(template, "sop", "rules.md"))
+        os.remove(os.path.join(template, "sop", "workflow.md"))                        # sync lo repone desde el repo
+        os.remove(os.path.join(project, "sop", "workflow.md"))
+        dry = self.aw("sync", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertFalse(os.path.exists(os.path.join(template, "sop", "workflow.md")))
+        real = self.aw("sync")
+        self.assertEqual(real.returncode, 0, real.stderr)
+        self.assertEqual(self.changes(dry.stdout), self.changes(real.stdout))
+        self.assertEqual(self.changes(real.stdout), ["    crear: sop/workflow.md"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "no")))
+        self.assertEqual(self.aw("init").returncode, 0)
 
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
@@ -1921,7 +1965,7 @@ class TestFunciones(AwCase):
                              ("tool --api-key k123 run", "k123"),
                              ("tool --db-password 'hunter two' run", "hunter two"),
                              ("DB_PASS=hunter2", "hunter2"),
-                             ("db.pass: hunter2", "hunter2"),
+                             ("db.pass = hunter2", "hunter2"),
                              ("PASS_PHRASE=hunter2", "hunter2")):
             self.assertNotIn(secret, r(text), text)
         self.assertEqual(r("mysql --password hunter2 -u root"), "mysql --password [oculto] -u root")
@@ -1931,23 +1975,22 @@ class TestFunciones(AwCase):
         r = self.aw_mod.redact
         for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated",
                      "pass: 3 fail: 0", "tests passed=3", "bypass=1", "--password --verbose",
-                     "tests/test_pass.py:12: AssertionError", "src/token_utils.py:12: error de sintaxis",
+                     "tests/test_pass.py:12: AssertionError", "FAILED tests/test_pass.py::test_x - assert 1 == 2",
                      "git: --no-password-prompt is not valid here", "modelo --token-limit 5 excedido"):
             self.assertEqual(r(text), text)
 
-    def test_redact_no_deja_pasar_secretos_por_las_excepciones(self):
-        # Una referencia archivo:línea no se oculta, pero lo que venga después se sigue revisando.
+    def test_redact_prefiere_ocultar_de_mas_a_dejar_pasar_un_secreto(self):
         r = self.aw_mod.redact
         for text, secret in (("secrets.py:3:PASSWORD=hunter2", "hunter2"),
                              ('./config/secrets.py:12:API_KEY="abc123def"', "abc123def"),
                              ('settings_token.json:{"token":"abc123"}', "abc123"),
                              ("db_password.txt: hunter2", "hunter2"),
-                             ("config.pass:1234", "1234"),
+                             ("db_password.txt:1:hunter2", "hunter2"),
+                             ("grep: api_key.json:7:abc123def", "abc123def"),
                              ("mc alias set x --secret-key hunter2", "hunter2"),
                              ("tool --private-key-passphrase hunter2", "hunter2"),
                              ("tool --password1 hunter2", "hunter2")):
             self.assertNotIn(secret, r(text), text)
-        self.assertEqual(r("secrets.py:3:PASSWORD=hunter2"), "secrets.py:3:PASSWORD [oculto]")
 
     def test_clean_title(self):
         self.assertEqual(self.aw_mod.clean_title("hacer algo (creada 2026-01-01) (iniciada 2026-01-02)"), "hacer algo")
@@ -2050,6 +2093,7 @@ class TestFunciones(AwCase):
         os.environ["HOME"] = home
         try:
             for command in (f'"{wrapper}" hook stop', f"'{wrapper}' hook stop", "~/.local/bin/aw hook stop",
+                            '"$HOME/.local/bin/aw" hook stop', "${HOME}/.local/bin/aw hook stop",
                             f'bash -c "cd /x && ~/.local/bin/aw hook stop"'):
                 self.assertEqual(sig(command), "stop", command)
             # Otro ejecutable llamado aw, o una ruta que solo termina en aw, es un hook del usuario.
