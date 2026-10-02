@@ -102,7 +102,8 @@ def is_git_commit(command):
     # están fuera de comillas: un mensaje que menciona --dry-run, entre comillas o en un heredoc, es un commit real.
     command = str(command or "")
     for match in GIT_COMMIT_RE.finditer(command):
-        line = QUOTED_RE.sub("Q", command[match.end():].split("\n", 1)[0])
+        line = re.sub(r"\\[\"']", "", command[match.end():].split("\n", 1)[0])  # las comillas escapadas no abren ni cierran nada
+        line = QUOTED_RE.sub("Q", line)
         line = re.split(r"[\"']", line, maxsplit=1)[0]  # una comilla sin cerrar abre un mensaje de varias líneas
         arguments = re.split(r"[;&|]", line, maxsplit=1)[0]
         if not re.search(r"(?:^|\s)--dry-run(?=\s|$|\))", arguments):

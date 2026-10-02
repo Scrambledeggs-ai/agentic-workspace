@@ -2038,13 +2038,15 @@ class TestFunciones(AwCase):
                     "bash -c \"git commit -m 'x --dry-run'\"", "git commit --dry-run; git commit -m x",
                     "git commit --dry-run\ngit commit -m x",
                     "git commit -m \"$(cat <<'EOF'\nAdd \"aw sync --dry-run\" docs\nEOF\n)\"",
-                    "git commit -F - <<'EOF'\nexplica --dry-run\nEOF"):
+                    "git commit -F - <<'EOF'\nexplica --dry-run\nEOF",
+                    'git commit -m "dice \\"hola\\" y --dry-run"'):
             self.assertTrue(check(yes), yes)
         for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls",
                    "echo hola\ngit log --grep commit", "git commit --dry-run", "git commit -m x --dry-run",
                    'echo "git commit -m x"', "sudo git status", "A=1 git log", 'git commit -m "a; b" --dry-run',
                    'bash -c "git commit --dry-run"', "git commit --dry-run && git status",
-                   'git commit --dry-run -m "x"', "", None):
+                   'git commit --dry-run -m "x"', 'bash -c "git commit -m \\"x\\" --dry-run"',
+                   "git commit -m don\\'t --dry-run", "", None):
             self.assertFalse(check(no), no)
 
     def test_merge_settings_no_modifica_el_original(self):
