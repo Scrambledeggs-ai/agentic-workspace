@@ -1498,6 +1498,302 @@ class TestMigracion(AwCase):
         self.assertIn("proyecto migrado a aw", self.read(folder, "execution", "run_log.md"))
 
 
+class TestImportar(AwCase):
+    """aw project import: mueve una carpeta a projects/, la sincroniza y la diagnostica."""
+
+    def outside(self, name="fuera"):
+        self.init()
+        folder = os.path.join(self.tmp, "otros", name)
+        self.write(os.path.join(folder, "doc.pdf"), "contenido")
+        return folder
+
+    def test_importar_mueve_sincroniza_y_diagnostica(self):
+        folder = self.outside()
+        result = self.aw("project", "import", folder, "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        project = self.project("fuera")
+        self.assertFalse(os.path.exists(folder))
+        self.assertEqual(self.read(project, "doc.pdf"), "contenido")
+        self.assertIn("projects/fuera", result.stdout)
+        self.assertIn("- fuera: 27 cambio(s)", result.stdout)
+        self.assertIn("Proyecto fuera", result.stdout)  # el diagnóstico
+        ficha = self.read(project, "MIGRACION.md")
+        self.assertIn(f"- Origen: `{os.path.realpath(folder)}` (importada con `aw project import`)", ficha)
+        log = self.read(project, "execution", "run_log.md")
+        self.assertIn("proyecto migrado a aw", log)
+        self.assertIn("[nota] proyecto importado desde", log)
+        self.assertTrue(os.path.isfile(os.path.join(project, "state.md")))
+
+    def test_el_modo_prueba_y_la_falta_de_confirmacion_no_mueven_nada(self):
+        folder = self.outside()
+        dry = self.aw("project", "import", folder, "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("Modo prueba: no se movió nada.", dry.stdout)
+        unanswered = self.aw("project", "import", folder, stdin="")
+        self.assertEqual(unanswered.returncode, 1)
+        wrong = self.aw("project", "import", folder, stdin="otro\n")
+        self.assertEqual(wrong.returncode, 1)
+        self.assertIn("Cancelado: no se movió nada.", wrong.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(folder, "doc.pdf")))
+        self.assertFalse(os.path.exists(self.project("fuera")))
+        confirmed = self.aw("project", "import", folder, stdin="fuera\n")
+        self.assertEqual(confirmed.returncode, 0, confirmed.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(self.project("fuera"), "doc.pdf")))
+
+    def test_importar_con_otro_nombre(self):
+        folder = self.outside()
+        result = self.aw("project", "import", folder, "--name", "cliente", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(self.project("cliente"), "doc.pdf")))
+        self.assertIn("# Migración de `cliente`", self.read(self.project("cliente"), "MIGRACION.md"))
+
+    def test_importar_rechaza_rutas_y_nombres_que_no_corresponden(self):
+        folder = self.outside()
+        inside = self.new_project("demo")
+        link = os.path.join(self.tmp, "enlace")
+        os.symlink(folder, link)
+        os.makedirs(self.project("ocupado"))
+        cases = [
+            ([os.path.join(self.tmp, "no-existe")], "No existe la carpeta"),
+            ([link], "enlace simbólico"),
+            ([inside], "ya está en projects/"),
+            ([os.path.join(inside, "tasks")], "ya está en projects/"),
+            ([self.tmp], "es el workspace o lo contiene"),
+            ([self.ws], "es el workspace o lo contiene"),
+            ([folder, "--name", "ocupado"], "Ya existe projects/ocupado"),
+            ([folder, "--name", "template_project"], "template_project es la plantilla"),
+            ([folder, "--name", "a/b"], "Nombre de proyecto inválido"),
+        ]
+        for args, message in cases:
+            result = self.aw("project", "import", *args, "--yes")
+            self.assertEqual(result.returncode, 2, args)
+            self.assertIn(message, result.stderr, args)
+        self.assertTrue(os.path.isfile(os.path.join(folder, "doc.pdf")))
+        self.assertEqual(os.listdir(self.project("ocupado")), [])
+
+    def test_importar_avisa_del_repositorio_superior_y_del_venv(self):
+        folder = self.outside()
+        self.write(os.path.join(folder, ".venv", "pyvenv.cfg"), "home = /usr/bin\n")
+        self.git(os.path.dirname(folder), "init", "-q")
+        out = self.aw("project", "import", folder, "--dry-run").stdout
+        self.assertIn("aviso: está dentro de un repositorio git superior", out)
+        self.assertIn("aviso: .venv lleva rutas absolutas", out)
+        self.assertIn("aviso: la memoria y las sesiones de Claude Code", out)
+
+    def test_importar_desde_otro_disco_no_copia_a_medias(self):
+        folder = self.outside()
+        aw = load_aw(self.ws)
+        original = os.rename
+
+        def other_disk(src, dst):
+            raise OSError(18, "Invalid cross-device link")  # EXDEV
+
+        os.rename = other_disk
+        try:
+            with open(os.devnull, "w") as null, contextlib.redirect_stdout(null):
+                with self.assertRaises(aw.AwError) as caught:
+                    aw.import_project(folder, yes=True)
+        finally:
+            os.rename = original
+        self.assertIn("otro disco", str(caught.exception))
+        self.assertTrue(os.path.isfile(os.path.join(folder, "doc.pdf")))
+        self.assertFalse(os.path.exists(self.project("fuera")))
+
+    def test_importar_un_proyecto_que_ya_es_de_aw_no_escribe_ficha(self):
+        project = self.new_project("demo")
+        loose = os.path.join(self.tmp, "otros", "demo")
+        os.makedirs(os.path.dirname(loose))
+        os.rename(project, loose)
+        result = self.aw("project", "import", loose, "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("aviso: ya tiene archivos de aw", result.stdout)
+        self.assertFalse(os.path.exists(os.path.join(project, "MIGRACION.md")))
+        self.assertIn("proyecto importado desde", self.read(project, "execution", "run_log.md"))
+
+
+class TestDeshacer(AwCase):
+    """aw unsync: borra lo que creó aw al migrar, solo si sigue sin cambios."""
+
+    def migrated(self, name="suelto"):
+        self.init()
+        folder = self.project(name)
+        self.write(os.path.join(folder, "doc.pdf"), "contenido")
+        result = self.aw("sync", name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return folder
+
+    def tree(self, folder):
+        found = []
+        for dirpath, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            found += [os.path.relpath(os.path.join(dirpath, n), folder) for n in files + dirs]
+        return sorted(found)
+
+    def session(self, folder):
+        payload = {"session_id": "s1", "cwd": folder}
+        self.hook("session-start", dict(payload, source="startup"), folder)
+        self.hook("pre-compact", dict(payload, trigger="auto"), folder)
+        self.hook("session-end", dict(payload, reason="exit"), folder)
+
+    def test_deshacer_deja_la_carpeta_como_estaba(self):
+        folder = self.migrated()
+        self.session(folder)  # lo que aw escribe solo no cuenta como cambio
+        self.assertIn("[sesión] terminada", self.read(folder, "execution", "run_log.md"))
+        dry = self.aw("unsync", "suelto", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("  borrar: project.md", dry.stdout)
+        self.assertIn("Modo prueba: no se borró nada.", dry.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(folder, "project.md")))
+        result = self.aw("unsync", "suelto", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("26 archivo(s) borrados", result.stdout)
+        self.assertEqual(self.tree(folder), ["doc.pdf"])
+        self.assertIn("La carpeta sigue en projects/", result.stdout)
+
+    def test_deshacer_pide_el_nombre_del_proyecto(self):
+        folder = self.migrated()
+        before = self.tree(folder)
+        for answer in ("", "otro\n", "s\n"):
+            result = self.aw("unsync", "suelto", stdin=answer)
+            self.assertEqual(result.returncode, 1, answer)
+            self.assertIn("Cancelado: no se borró nada.", result.stdout)
+            self.assertEqual(self.tree(folder), before)
+        result = self.aw("unsync", "suelto", stdin="suelto\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tree(folder), ["doc.pdf"])
+
+    def test_con_cambios_avisa_y_no_borra_nada(self):
+        edits = {
+            "tarea": (lambda f: self.aw("task", "add", "algo", cwd=f), "tasks/backlog.md"),
+            "decisión": (lambda f: self.aw("decide", "usar X", "--why", "porque sí", cwd=f), "execution/decisions.md"),
+            "nota": (lambda f: self.aw("log", "nota del usuario", cwd=f), "execution/run_log.md"),
+            "ficha del proyecto": (lambda f: self.write(os.path.join(f, "project.md"), "# Mi proyecto\nCliente: Acme\n"),
+                                   "project.md"),
+            "estado manual": (lambda f: self.write(os.path.join(f, "state.md"), "Estado: lo llevo a mano\n"), "state.md"),
+            "hooks propios": (lambda f: self.write(os.path.join(f, ".claude", "settings.json"), '{"hooks": {}}\n'),
+                              ".claude/settings.json"),
+            "índice con texto propio": (lambda f: self.write(
+                os.path.join(f, "artifacts", "outputs.md"),
+                self.read(f, "artifacts", "outputs.md") + "\nMis notas sobre los entregables.\n"), "artifacts/outputs.md"),
+        }
+        for label, (edit, rel) in edits.items():
+            with self.subTest(label):
+                name = "p" + str(abs(hash(label)) % 10000)
+                folder = self.migrated(name)
+                edit(folder)
+                before = self.tree(folder)
+                for extra in ([], ["--yes"], ["--dry-run"]):
+                    result = self.aw("unsync", name, *extra)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"  con cambios: {rel} (", result.stdout)
+                    self.assertIn("no se borra nada", result.stdout)
+                    self.assertEqual(self.tree(folder), before)
+
+    def test_lo_que_existia_antes_no_se_toca(self):
+        self.init()
+        folder = self.project("suelto")
+        own = {
+            "CLAUDE.md": "# Instrucciones propias\n",
+            "memory.md": "# Memoria propia\n",
+            os.path.join("tasks", "celery.py"): "x = 1\n",
+            os.path.join(".claude", "settings.json"): json.dumps({"permissions": {"allow": ["Bash(ls)"]}}),
+        }
+        for rel, text in own.items():
+            self.write(os.path.join(folder, rel), text)
+        self.aw("sync", "suelto")
+        merged = self.read(folder, ".claude", "settings.json")
+        self.write(os.path.join(folder, "artifacts", "informe.html"), "<html></html>")  # entregable posterior
+        self.aw("sync", "suelto")  # el índice de artifacts/ ya lista el entregable
+        self.assertIn("informe.html", self.read(folder, "artifacts", "outputs.md"))
+        result = self.aw("unsync", "suelto", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.read(folder, "CLAUDE.md"), own["CLAUDE.md"])
+        self.assertEqual(self.read(folder, "memory.md"), own["memory.md"])
+        self.assertEqual(self.read(folder, "tasks", "celery.py"), "x = 1\n")
+        self.assertEqual(self.read(folder, ".claude", "settings.json"), merged)
+        self.assertIn(".claude/settings.json ya existía y no se toca", result.stdout)
+        self.assertIn(".claude/settings.json.bak-", result.stdout)
+        remaining = [f for f in self.tree(folder) if not f.startswith(os.path.join(".claude", "settings.json.bak-"))]
+        self.assertEqual(remaining, sorted([".claude", os.path.join(".claude", "settings.json"), "CLAUDE.md", "artifacts",
+                                            os.path.join("artifacts", "informe.html"), "memory.md", "tasks",
+                                            os.path.join("tasks", "celery.py")]))
+
+    def test_sin_la_lista_de_la_ficha_no_se_borra_nada(self):
+        project = self.new_project("demo")  # creado con aw: no hay ficha
+        before = self.tree(project)
+        result = self.aw("unsync", "demo", "--yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no tiene MIGRACION.md con la lista", result.stderr)
+        self.write(os.path.join(project, "MIGRACION.md"), "mi ficha, sin lista\n")
+        self.assertEqual(self.aw("unsync", "demo", "--yes").returncode, 2)
+        self.assertEqual(self.tree(project), sorted(before + ["MIGRACION.md"]))
+        self.assertEqual(self.aw("unsync", "template_project", "--yes").returncode, 2)
+        self.assertEqual(self.aw("unsync", "../demo", "--yes").returncode, 2)
+
+    def test_la_lista_no_permite_borrar_fuera_del_proyecto_ni_seguir_enlaces(self):
+        folder = self.migrated()
+        victim = os.path.join(self.tmp, "ajeno.md")
+        self.write(victim, "# Memoria\n")
+        os.remove(os.path.join(folder, "memory.md"))
+        os.symlink(victim, os.path.join(folder, "memory.md"))
+        ficha = self.read(folder, "MIGRACION.md")
+        self.write(os.path.join(folder, "MIGRACION.md"),
+                   ficha.replace("<!-- aw:auto:fin -->", "- `../../../ajeno.md`\n- `" + victim + "`\n<!-- aw:auto:fin -->"))
+        result = self.aw("unsync", "suelto", "--yes")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("con cambios: memory.md (ya no es un archivo normal del proyecto)", result.stdout)
+        self.assertNotIn("ajeno.md", result.stdout)
+        self.assertEqual(slurp(victim), "# Memoria\n")
+
+    def test_una_ficha_con_notas_se_conserva(self):
+        folder = self.migrated()
+        ficha = self.read(folder, "MIGRACION.md")
+        self.write(os.path.join(folder, "MIGRACION.md"),
+                   ficha.replace("(incidencias de la migración y lo aprendido; lo completa quien migra)", "Hubo que renombrar."))
+        result = self.aw("unsync", "suelto", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MIGRACION.md se conserva", result.stdout)
+        self.assertEqual(self.tree(folder), ["MIGRACION.md", "doc.pdf"])
+
+    def test_despues_de_deshacer_los_hooks_no_escriben_en_la_carpeta(self):
+        folder = self.migrated()
+        self.assertEqual(self.aw("unsync", "suelto", "--yes").returncode, 0)
+        self.session(folder)
+        self.assertEqual(self.tree(folder), ["doc.pdf"])
+        self.assertEqual(self.aw("task", "add", "algo", cwd=folder).returncode, 2)
+        self.assertEqual(self.tree(folder), ["doc.pdf"])
+
+    def test_deshacer_avisa_de_lo_versionado_en_git(self):
+        folder = self.migrated()
+        self.git(folder, "init", "-q")
+        self.git(folder, "add", "doc.pdf", "project.md")
+        self.git(folder, "commit", "-q", "-m", "inicial")
+        result = self.aw("unsync", "suelto", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1 archivo(s) borrados estaban versionados en git (project.md)", result.stdout)
+        self.assertIn(os.path.join(".git", "info", "exclude"), result.stdout)
+        self.assertEqual(self.git(folder, "status", "--short").strip(), "D project.md")
+
+    def test_deshacer_un_proyecto_importado_indica_como_devolverlo(self):
+        self.init()
+        origin = os.path.join(self.tmp, "otros", "fuera")
+        self.write(os.path.join(origin, "doc.pdf"), "contenido")
+        self.assertEqual(self.aw("project", "import", origin, "--yes").returncode, 0)
+        project = self.project("fuera")
+        result = self.aw("unsync", "fuera", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.tree(project), ["doc.pdf"])  # la nota de la importación no cuenta como cambio
+        self.assertIn(f'mv "{project}" "{os.path.realpath(origin)}"', result.stdout)
+
+    def test_desde_otro_proyecto_no_se_deshace(self):
+        folder = self.migrated()
+        other = self.new_project("demo")
+        before = self.tree(folder)
+        result = self.aw("unsync", "suelto", "--yes", cwd=other)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.tree(folder), before)
+
+
 class TestDoctor(AwCase):
     def test_proyecto_nuevo_sin_pendientes_graves(self):
         self.new_project()
