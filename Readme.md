@@ -169,6 +169,12 @@ git pull
 
 ---
 
+## Licencia
+
+MIT. Ver [LICENSE](LICENSE).
+
+---
+
 ## Autor
 
 Scrambledeggs-ai
