@@ -257,6 +257,17 @@ class TestEstructura(AwCase):
         agents = self.aw(stdin="6\na\nc\n0\n")
         self.assertIn("Coding Agent", agents.stdout)
 
+    def test_los_textos_visibles_estan_en_espanol_neutro(self):
+        voseo = re.compile(r"\b(eleg[ií]|corré|creá|agregá|abrí|podés|usá|querés|tenés|ejecutá|mirá|probá|hacé|andá|"
+                           r"fijate|completá|escribí|poné|dejá|guardá|revisá|ingresá|vos)\b", re.I)
+        paths = [SCRIPT, os.path.join(REPO, "Readme.md")]
+        for dirpath, _dirs, files in os.walk(os.path.join(REPO, "templates")):
+            paths += [os.path.join(dirpath, f) for f in files]
+        found = [f"{os.path.relpath(path, REPO)}:{number}: {match.group(0)}"
+                 for path in paths for number, line in enumerate(slurp(path).splitlines(), 1)
+                 for match in voseo.finditer(line)]
+        self.assertEqual(found, [])
+
     def test_el_menu_sale_sin_traza_si_se_corta_la_entrada(self):
         self.new_project()
         # Sin terminal o con Ctrl-D la entrada se acaba: en el menú, en un submenú o a mitad de una pregunta.

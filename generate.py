@@ -359,7 +359,7 @@ def action_init():
 def list_registry(folder):
     dirpath = os.path.join(ROOT, folder)
     if not os.path.isdir(dirpath):
-        print("No existe la carpeta todavía. Corré primero 'Iniciar / actualizar estructura del sistema'.")
+        print("No existe la carpeta todavía. Ejecuta primero 'Iniciar / actualizar estructura del sistema'.")
         return
     entries = sorted(f for f in os.listdir(dirpath) if f.endswith(".md"))
     if not entries:
@@ -397,7 +397,7 @@ def registry_menu(label, folder):
         print("a) Ver disponibles")
         print("b) Crear nuevo")
         print("c) Volver")
-        choice = input("Elegí una opción: ").strip().lower()
+        choice = input("Elige una opción: ").strip().lower()
         if choice == "a":
             print()
             list_registry(folder)
@@ -494,7 +494,7 @@ def create_project(name, description=""):
 def action_new_project():
     template = os.path.join(ROOT, "projects", "template_project")
     if not os.path.isdir(template):
-        print("No existe template_project. Corré primero 'Iniciar / actualizar estructura del sistema'.")
+        print("No existe template_project. Ejecuta primero 'Iniciar / actualizar estructura del sistema'.")
         return
     name = input("Nombre del proyecto: ").strip()
     if not name:
@@ -512,7 +512,7 @@ def action_new_project():
 def action_list_projects():
     projects = list_projects()
     if not projects:
-        print("No hay proyectos todavía. Creá uno desde la opción 1.")
+        print("No hay proyectos todavía. Crea uno desde la opción 1.")
         return
     for name in projects:
         state_file = os.path.join(ROOT, "projects", name, "state.md")
@@ -522,11 +522,11 @@ def action_list_projects():
 def choose_project():
     projects = list_projects()
     if not projects:
-        print("No hay proyectos todavía. Creá uno desde la opción 1.")
+        print("No hay proyectos todavía. Crea uno desde la opción 1.")
         return None
     for i, name in enumerate(projects, 1):
         print(f"{i}) {name}")
-    choice = input("Elegí un proyecto (número): ").strip()
+    choice = input("Elige un proyecto (número): ").strip()
     if not choice.isdigit() or not (1 <= int(choice) <= len(projects)):
         print("Opción inválida.")
         return None
@@ -1791,7 +1791,7 @@ def doctor(names=None):
 
 def action_install_command():
     if sys.platform.startswith("win"):
-        print("El instalador todavía no soporta Windows. Por ahora usá 'python3 generate.py' directamente.")
+        print("El instalador todavía no soporta Windows. Por ahora usa 'python3 generate.py' directamente.")
         return
     bin_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(bin_dir, exist_ok=True)
@@ -1806,10 +1806,10 @@ def action_install_command():
     path_dirs = os.environ.get("PATH", "").split(os.pathsep)
     if bin_dir not in path_dirs:
         print(f"\n{bin_dir} todavía no está en tu PATH.")
-        print("Agregá esta línea a tu ~/.bashrc o ~/.zshrc y abrí una terminal nueva:\n")
+        print("Agrega esta línea a tu ~/.bashrc o ~/.zshrc y abre una terminal nueva:\n")
         print('  export PATH="$HOME/.local/bin:$PATH"\n')
     else:
-        print(f"Ya podés usar el comando '{WRAPPER_NAME}' desde cualquier carpeta.")
+        print(f"Ya puedes usar el comando '{WRAPPER_NAME}' desde cualquier carpeta.")
 
 
 # -- Menú principal --
@@ -1830,7 +1830,7 @@ def main_menu():
     print(BANNER)
     while True:
         print(MENU)
-        choice = input("Elegí una opción: ").strip()
+        choice = input("Elige una opción: ").strip()
         print()
         try:
             if choice == "1":
