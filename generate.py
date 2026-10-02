@@ -113,6 +113,12 @@ def is_git_commit(command):
 
 HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
 
+TEXT_EXT = (".md", ".json")  # los únicos archivos que aw interpreta; lo demás no lo lee
+
+
+def is_text_file(name):
+    return name.lower().endswith(TEXT_EXT)
+
 ARTIFACT_INDEX_FILES = ("outputs.md", "code_snippets.md", "assets_index.md")
 ASSET_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".mp4", ".mov", ".mp3", ".wav", ".fig"}
 
@@ -226,7 +232,7 @@ def template_content(relpath, variables):
     path = os.path.join(TEMPLATES_DIR, *relpath.split("/"))
     if not os.path.isfile(path):
         return None
-    return render(read_text(path), variables, json_safe=relpath.endswith(".json"))
+    return render(read_text(path), variables, json_safe=relpath.lower().endswith(".json"))
 
 
 WS_MARK_RE = re.compile(r"<!-- aw:plantilla sha256=([0-9a-f]{64}) -->\n?\Z")
@@ -357,7 +363,7 @@ def action_init():
 def list_registry(folder):
     dirpath = os.path.join(ROOT, folder)
     if not os.path.isdir(dirpath):
-        print("No existe la carpeta todavía. Corré primero 'Iniciar / actualizar estructura del sistema'.")
+        print("No existe la carpeta todavía. Ejecuta primero 'Iniciar / actualizar estructura del sistema'.")
         return
     entries = sorted(f for f in os.listdir(dirpath) if f.endswith(".md"))
     if not entries:
@@ -395,7 +401,7 @@ def registry_menu(label, folder):
         print("a) Ver disponibles")
         print("b) Crear nuevo")
         print("c) Volver")
-        choice = input("Elegí una opción: ").strip().lower()
+        choice = input("Elige una opción: ").strip().lower()
         if choice == "a":
             print()
             list_registry(folder)
@@ -438,18 +444,23 @@ def summary_line(filepath):
 def render_tree(root_dir, variables):
     for dirpath, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if not fname.endswith((".md", ".json")):
+            if not is_text_file(fname):
                 continue
             fpath = os.path.join(dirpath, fname)
             text = read_text(fpath)
-            new = render(text, variables, json_safe=fname.endswith(".json"))
+            new = render(text, variables, json_safe=fname.lower().endswith(".json"))
             if new != text:
                 write_text(fpath, new)
 
 
 def ignore_template_extras(dirpath, names):
-    # Al copiar la plantilla no se llevan los respaldos ni los enlaces simbólicos rotos.
-    return [n for n in names if ".bak-" in n or not os.path.exists(os.path.join(dirpath, n))]
+    # Al copiar la plantilla solo se llevan carpetas y archivos .md y .json (la misma regla que en sync), sin
+    # respaldos ni enlaces simbólicos rotos.
+    def skip(name):
+        path = os.path.join(dirpath, name)
+        return ".bak-" in name or not os.path.exists(path) or not (os.path.isdir(path) or is_text_file(name))
+
+    return [name for name in names if skip(name)]
 
 
 def create_project(name, description=""):
@@ -492,7 +503,7 @@ def create_project(name, description=""):
 def action_new_project():
     template = os.path.join(ROOT, "projects", "template_project")
     if not os.path.isdir(template):
-        print("No existe template_project. Corré primero 'Iniciar / actualizar estructura del sistema'.")
+        print("No existe template_project. Ejecuta primero 'Iniciar / actualizar estructura del sistema'.")
         return
     name = input("Nombre del proyecto: ").strip()
     if not name:
@@ -510,7 +521,7 @@ def action_new_project():
 def action_list_projects():
     projects = list_projects()
     if not projects:
-        print("No hay proyectos todavía. Creá uno desde la opción 1.")
+        print("No hay proyectos todavía. Crea uno desde la opción 1.")
         return
     for name in projects:
         state_file = os.path.join(ROOT, "projects", name, "state.md")
@@ -520,11 +531,11 @@ def action_list_projects():
 def choose_project():
     projects = list_projects()
     if not projects:
-        print("No hay proyectos todavía. Creá uno desde la opción 1.")
+        print("No hay proyectos todavía. Crea uno desde la opción 1.")
         return None
     for i, name in enumerate(projects, 1):
         print(f"{i}) {name}")
-    choice = input("Elegí un proyecto (número): ").strip()
+    choice = input("Elige un proyecto (número): ").strip()
     if not choice.isdigit() or not (1 <= int(choice) <= len(projects)):
         print("Opción inválida.")
         return None
@@ -1392,21 +1403,26 @@ def walk_order(rel):
     return [(1, part) for part in parts[:-1]] + [(0, parts[-1])]
 
 
-def template_sources(template, overlay=None):
-    sources = {}
+def template_files(template):
+    # Los archivos de la plantilla que aw gestiona, como (ruta relativa, ruta): solo .md y .json, sin respaldos.
+    # Lo demás (un .DS_Store, una imagen) no se lee ni se lleva a los proyectos, tampoco a los nuevos.
     for dirpath, _dirs, files in os.walk(template):
         for fname in files:
-            if ".bak-" in fname:
-                continue
-            source = os.path.join(dirpath, fname)
-            rel = os.path.relpath(source, template).replace(os.sep, "/")
-            if rel == ".claude/settings.json" and repo_settings_text().strip():
-                sources[rel] = ""  # se usa el del repo: el de la plantilla no hace falta leerlo
-                continue
-            try:
-                sources[rel] = read_text(source)
-            except OSError:
-                continue  # enlace en bucle o archivo sin permiso de lectura: no se usa
+            if is_text_file(fname) and ".bak-" not in fname:
+                path = os.path.join(dirpath, fname)
+                yield os.path.relpath(path, template).replace(os.sep, "/"), path
+
+
+def template_sources(template, overlay=None):
+    sources = {}
+    for rel, source in template_files(template):
+        if rel == ".claude/settings.json" and repo_settings_text().strip():
+            sources[rel] = ""  # se usa el del repo: el de la plantilla no hace falta leerlo
+            continue
+        try:
+            sources[rel] = read_text(source)
+        except OSError:
+            continue  # enlace en bucle o archivo sin permiso de lectura: no se usa
     sources.update(overlay or {})
     return sources
 
@@ -1430,7 +1446,7 @@ def sync_project(project, sources, dry_run=False):
             continue
         changes.append((action, rel))
         if not dry_run:
-            write_text(dest, render(source_text, variables, json_safe=rel.endswith(".json")))
+            write_text(dest, render(source_text, variables, json_safe=rel.lower().endswith(".json")))
     if not dry_run:
         refresh_state(project)
         refresh_artifact_indexes(project)
@@ -1591,18 +1607,14 @@ def doctor_project(project):
     fillable = set()  # archivos que aw sync rellena si están vacíos: los que la plantilla trae con contenido
     if os.path.isdir(template):
         missing = []
-        for dirpath, _dirs, files in os.walk(template):
-            for fname in files:
-                if ".bak-" in fname:
-                    continue
-                rel = os.path.relpath(os.path.join(dirpath, fname), template).replace(os.sep, "/")
-                try:
-                    if os.path.getsize(os.path.join(dirpath, fname)):
-                        fillable.add(rel)
-                except OSError:
-                    continue  # enlace simbólico roto en la plantilla: sync tampoco lo copia
-                if not os.path.exists(pj(project, *rel.split("/"))):
-                    missing.append(rel)
+        for rel, source in template_files(template):
+            try:
+                if os.path.getsize(source):
+                    fillable.add(rel)
+            except OSError:
+                continue  # enlace simbólico roto en la plantilla: sync tampoco lo copia
+            if not os.path.exists(pj(project, *rel.split("/"))):
+                missing.append(rel)
         if missing:
             add("warn", f"faltan {len(missing)} archivo(s) de la plantilla (aw sync los crea): " + ", ".join(sorted(missing)[:4]) + ("…" if len(missing) > 4 else ""))
         else:
@@ -1703,13 +1715,20 @@ def doctor_project(project):
     for folder, label in (("agents", "agentes"), ("skills", "skills")):
         notes = pj(project, folder, f"assigned_{folder}.md")
         for cells in markdown_rows(read_text(notes)):
-            if len(cells) < 2 or not cells[1] or cells[1] == "(completar)":
+            # Se acepta el nombre del archivo, la ruta desde la raíz (agents/x.md), una ruta absoluta o con ~,
+            # y cualquiera de ellas entre comillas invertidas.
+            name = cells[1].strip("`").strip() if len(cells) >= 2 else ""
+            if not name or name == "(completar)":
                 continue
-            target = os.path.expanduser(cells[1])
+            target = os.path.expanduser(name)
+            inside = True
             if not os.path.isabs(target):
-                target = os.path.join(ROOT, folder, target)
-            if not os.path.exists(target):
-                add("bad", f"{label} asignados: no existe {cells[1]} (fila '{cells[0]}')")
+                base = os.path.join(ROOT, folder)
+                relative = target[len(folder) + 1:] if target.startswith(folder + "/") else target
+                target = os.path.normpath(os.path.join(base, relative))
+                inside = target.startswith(base + os.sep)  # un archivo dentro de la carpeta, no la carpeta ni otra
+            if not inside or not os.path.exists(target):
+                add("bad", f"{label} asignados: no existe {name} (fila '{cells[0]}')")
 
     mcp_names = set()
     try:
@@ -1786,7 +1805,7 @@ def doctor(names=None):
 
 def action_install_command():
     if sys.platform.startswith("win"):
-        print("El instalador todavía no soporta Windows. Por ahora usá 'python3 generate.py' directamente.")
+        print("El instalador todavía no soporta Windows. Por ahora usa 'python3 generate.py' directamente.")
         return
     bin_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(bin_dir, exist_ok=True)
@@ -1801,10 +1820,10 @@ def action_install_command():
     path_dirs = os.environ.get("PATH", "").split(os.pathsep)
     if bin_dir not in path_dirs:
         print(f"\n{bin_dir} todavía no está en tu PATH.")
-        print("Agregá esta línea a tu ~/.bashrc o ~/.zshrc y abrí una terminal nueva:\n")
+        print("Agrega esta línea a tu ~/.bashrc o ~/.zshrc y abre una terminal nueva:\n")
         print('  export PATH="$HOME/.local/bin:$PATH"\n')
     else:
-        print(f"Ya podés usar el comando '{WRAPPER_NAME}' desde cualquier carpeta.")
+        print(f"Ya puedes usar el comando '{WRAPPER_NAME}' desde cualquier carpeta.")
 
 
 # -- Menú principal --
@@ -1825,7 +1844,7 @@ def main_menu():
     print(BANNER)
     while True:
         print(MENU)
-        choice = input("Elegí una opción: ").strip()
+        choice = input("Elige una opción: ").strip()
         print()
         try:
             if choice == "1":
@@ -1971,7 +1990,13 @@ def dispatch(args):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
-        main_menu()
+        try:
+            main_menu()
+        except EOFError:
+            print("\nHasta luego.")  # Ctrl-D o entrada sin terminal: se sale como con la opción 0
+        except KeyboardInterrupt:
+            print("\nInterrumpido.")
+            return 130
         return 0
     if argv[0] == "hook":
         return run_hook(argv[1] if len(argv) > 1 else "")

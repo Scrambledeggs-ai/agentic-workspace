@@ -257,6 +257,36 @@ class TestEstructura(AwCase):
         agents = self.aw(stdin="6\na\nc\n0\n")
         self.assertIn("Coding Agent", agents.stdout)
 
+    def test_los_textos_visibles_estan_en_espanol_neutro(self):
+        voseo = re.compile(r"\b(eleg[ií]|corré|creá|agregá|abrí|podés|usá|querés|tenés|ejecutá|mirá|probá|hacé|andá|"
+                           r"fijate|completá|escribí|poné|dejá|guardá|revisá|ingresá|vos)\b", re.I)
+        paths = [SCRIPT, os.path.join(REPO, "Readme.md")]
+        for dirpath, _dirs, files in os.walk(os.path.join(REPO, "templates")):
+            paths += [os.path.join(dirpath, f) for f in files if f.lower().endswith((".md", ".json"))]
+        found = [f"{os.path.relpath(path, REPO)}:{number}: {match.group(0)}"
+                 for path in paths for number, line in enumerate(slurp(path).splitlines(), 1)
+                 for match in voseo.finditer(line)]
+        self.assertEqual(found, [])
+
+    def test_el_menu_sale_sin_traza_si_se_corta_la_entrada(self):
+        self.new_project()
+        # Sin terminal o con Ctrl-D la entrada se acaba: en el menú, en un submenú o a mitad de una pregunta.
+        for stdin in ("", "6\n", "1\n", "1\ndemo2\n", "3\n", "11\n"):
+            result = self.aw(stdin=stdin)
+            self.assertEqual(result.returncode, 0, repr(stdin))
+            self.assertNotIn("Traceback", result.stderr, repr(stdin))
+            self.assertEqual(result.stderr, "", repr(stdin))
+            self.assertTrue(result.stdout.rstrip().endswith("Hasta luego."), repr(stdin))
+        self.assertFalse(os.path.exists(self.project("demo2")))
+        aw = load_aw(self.ws)
+
+        def ctrl_c(_prompt=""):
+            raise KeyboardInterrupt
+
+        aw.input = ctrl_c
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            self.assertEqual(aw.main([]), 130)  # una interrupción no es una salida normal
+
     def test_el_menu_no_crea_agentes_skills_ni_herramientas_fuera_de_su_carpeta(self):
         self.init()
         agents = os.path.join(self.ws, "agents")
@@ -1213,6 +1243,45 @@ class TestSync(AwCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "no")))
         self.assertEqual(self.aw("init").returncode, 0)
 
+    def test_aw_solo_interpreta_md_y_json_de_la_plantilla(self):
+        project = self.new_project()
+        template = self.project("template_project")
+        for rel in (".DS_Store", os.path.join("sop", ".DS_Store"), os.path.join("sop", "logo.png")):
+            with open(os.path.join(template, rel), "wb") as f:
+                f.write(b"\x00\x00\x00\x01Bud1\xff\xfe\x89PNG")
+        self.write(os.path.join(template, "sop", "notas.txt"), "texto que aw no gestiona\n")
+        for args in (("sync", "--dry-run"), ("sync",)):
+            result = self.aw(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("- demo: al día", result.stdout)
+        doctor = self.aw("doctor")
+        self.assertIn("✓ estructura completa", doctor.stdout)
+        self.assertNotIn("faltan", doctor.stdout)
+        self.assertEqual(self.aw("project", "new", "otro").returncode, 0)
+        for rel in (".DS_Store", os.path.join("sop", ".DS_Store"), os.path.join("sop", "logo.png"),
+                    os.path.join("sop", "notas.txt")):
+            for name in ("demo", "otro"):
+                self.assertFalse(os.path.exists(os.path.join(self.project(name), rel)), (name, rel))
+        self.assertTrue(os.path.isfile(os.path.join(self.project("otro"), "sop", "rules.md")))
+        # La extensión cuenta sin distinguir mayúsculas.
+        self.write(os.path.join(template, "sop", "GUIA.MD"), "Guía de @@PROJECT@@\n")
+        self.assertIn("crear: sop/GUIA.MD", self.aw("sync").stdout)
+        self.assertEqual(self.read(project, "sop", "GUIA.MD"), "Guía de demo\n")
+        self.write(os.path.join(template, "sop", "meta.JSON"), '{"proyecto": "@@PROJECT@@", "desc": "@@DESCRIPTION@@"}\n')
+        self.aw("project", "new", "tercero", "--desc", 'dice "hola"')
+        self.assertEqual(self.read(self.project("tercero"), "sop", "GUIA.MD"), "Guía de tercero\n")
+        self.assertEqual(json.loads(self.read(self.project("tercero"), "sop", "meta.JSON"))["desc"], 'dice "hola"')
+        self.aw("sync")
+        self.assertEqual(json.loads(self.read(project, "sop", "meta.JSON"))["proyecto"], "demo")
+        # Un .md de la plantilla mal codificado sí es asunto de aw: error claro con su nombre.
+        bad = os.path.join(template, "sop", "rules.md")
+        with open(bad, "wb") as f:
+            f.write(b"\xff\xfe reglas")
+        result = self.aw("sync")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no está en UTF-8", result.stderr)
+        self.assertIn(bad, result.stderr)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")
@@ -1310,6 +1379,36 @@ class TestDoctor(AwCase):
         result = self.aw("doctor")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn("asignados", result.stdout)
+
+    def test_acepta_las_formas_habituales_de_escribir_un_agente_o_skill_asignado(self):
+        project = self.new_project()
+        self.write(os.path.join(self.ws, "skills", "auditor.skill", "SKILL.md"), "instrucciones")
+        absolute = os.path.join(self.ws, "agents", "coding_agent.md")
+        self.write(os.path.join(project, "agents", "assigned_agents.md"),
+                   "# Agentes\n\n| Tarea | Agente (archivo) | Notas |\n|---|---|---|\n"
+                   "| Solo nombre | coding_agent.md | |\n"
+                   "| Con carpeta | agents/coding_agent.md | |\n"
+                   "| Entre comillas | `coding_agent.md` | |\n"
+                   "| Carpeta y comillas | `agents/coding_agent.md` | |\n"
+                   f"| Absoluta | {absolute} | |\n")
+        self.write(os.path.join(project, "skills", "assigned_skills.md"),
+                   "# Skills\n\n| Tarea | Skill | Notas |\n|---|---|---|\n"
+                   "| Carpeta | skills/auditor.skill | |\n| Comillas | `auditor.skill` | |\n"
+                   "| Sin completar | `(completar)` | |\n| Vacía | `` | |\n")
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("asignados", result.stdout)
+        self.write(os.path.join(project, "agents", "assigned_agents.md"),
+                   "# Agentes\n\n| Tarea | Agente (archivo) | Notas |\n|---|---|---|\n"
+                   "| Falta | `agents/no_existe.md` | |\n| Fuera | ../../no_existe.md | |\n"
+                   "| Raíz | CLAUDE.md | |\n| Otra carpeta | core/config.md | |\n| De skills | skills/auditor.skill | |\n"
+                   "| Solo carpeta | agents/ | |\n| Sale | agents/../CLAUDE.md | |\n")
+        result = self.aw("doctor")
+        self.assertEqual(result.returncode, 1)
+        for cell, row in (("agents/no_existe.md", "Falta"), ("../../no_existe.md", "Fuera"), ("CLAUDE.md", "Raíz"),
+                          ("core/config.md", "Otra carpeta"), ("skills/auditor.skill", "De skills"),
+                          ("agents/", "Solo carpeta"), ("agents/../CLAUDE.md", "Sale")):
+            self.assertIn(f"✕ agentes asignados: no existe {cell} (fila '{row}')", result.stdout)
 
     def test_compara_herramientas_con_mcp_json(self):
         project = self.new_project()
