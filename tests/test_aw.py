@@ -1290,6 +1290,143 @@ class TestSync(AwCase):
         self.assertTrue(os.path.isfile(os.path.join(template, "assigned_skills.md")))
 
 
+class TestMigracion(AwCase):
+    """aw sync sobre una carpeta que todavía no es un proyecto aw (sin state.md ni tasks/)."""
+
+    def loose_folder(self, name="suelto"):
+        self.init()
+        folder = self.project(name)
+        self.write(os.path.join(folder, "doc.pdf"), "contenido")
+        stamp = time.mktime((2025, 3, 4, 12, 0, 0, 0, 0, -1))
+        os.utime(os.path.join(folder, "doc.pdf"), (stamp, stamp))
+        return folder
+
+    def created(self, project):
+        text = self.read(project, "MIGRACION.md")
+        block = text.split("<!-- aw:auto:inicio -->")[1].split("<!-- aw:auto:fin -->")[0]
+        return re.findall(r"^- `(.+)`$", block, re.M)
+
+    def changes(self, output):
+        return [line for line in output.splitlines() if line.startswith("    ")]
+
+    def test_sync_de_una_carpeta_sin_git_escribe_la_ficha_el_registro_y_la_fecha(self):
+        folder = self.loose_folder()
+        dry = self.aw("sync", "suelto", "--dry-run")
+        self.assertFalse(os.path.exists(os.path.join(folder, "MIGRACION.md")))
+        real = self.aw("sync", "suelto")
+        self.assertEqual(real.returncode, 0, real.stderr)
+        self.assertEqual(self.changes(dry.stdout), self.changes(real.stdout))
+        self.assertIn("- suelto: 27 cambio(s)", real.stdout)
+        self.assertEqual(self.changes(real.stdout)[-1], "    crear: MIGRACION.md")
+        ficha = self.read(folder, "MIGRACION.md")
+        self.assertIn("# Migración de `suelto`", ficha)
+        self.assertIn("- Archivos propios: 1 (el más antiguo, del 2025-03-04)", ficha)
+        self.assertIn("- Repositorio git: no", ficha)
+        self.assertIn("- Dependencias instaladas (node_modules, venv): no", ficha)
+        self.assertIn("- Archivos propios con nombres que usa aw, respetados: ninguno", ficha)
+        created = self.created(folder)
+        self.assertEqual(len(created), 26)
+        self.assertIn("CLAUDE.md", created)
+        self.assertIn(".claude/settings.json", created)
+        self.assertNotIn("MIGRACION.md", created)
+        self.assertNotIn("doc.pdf", created)
+        for rel in created:
+            self.assertTrue(os.path.isfile(os.path.join(folder, *rel.split("/"))), rel)
+        self.assertIn("- Fecha de inicio: 2025-03-04", self.read(folder, "project.md"))
+        log = self.read(folder, "execution", "run_log.md")
+        self.assertIn("[nota] proyecto migrado a aw: 26 archivo(s) creados, 0 propio(s) respetado(s)", log)
+        self.assertNotIn("el registro de ejecución no tiene entradas", self.aw("doctor", "suelto").stdout)
+        # Sincronizar de nuevo no repite nada.
+        again = self.aw("sync", "suelto")
+        self.assertIn("- suelto: al día", again.stdout)
+        self.assertEqual(self.read(folder, "MIGRACION.md"), ficha)
+        self.assertEqual(self.read(folder, "execution", "run_log.md").count("proyecto migrado"), 1)
+
+    def test_sync_de_una_carpeta_vacia_usa_la_fecha_de_hoy(self):
+        self.init()
+        folder = self.project("vacio")
+        os.makedirs(folder)
+        self.aw("sync", "vacio")
+        self.assertIn("- Archivos propios: ninguno (la carpeta estaba vacía)", self.read(folder, "MIGRACION.md"))
+        self.assertIn(f"- Fecha de inicio: {time.strftime('%Y-%m-%d')}", self.read(folder, "project.md"))
+
+    def test_sync_de_un_repositorio_respeta_lo_propio_y_toma_la_fecha_del_primer_commit(self):
+        folder = self.loose_folder("repo")
+        self.write(os.path.join(folder, "CLAUDE.md"), "# Instrucciones propias\n")
+        self.write(os.path.join(folder, "node_modules", "paquete", "index.js"), "x")
+        self.write(os.path.join(folder, ".gitignore"), "node_modules/\n")
+        self.git(folder, "init", "-q")
+        self.git(folder, "add", "CLAUDE.md", ".gitignore", "doc.pdf")
+        date = {"GIT_AUTHOR_DATE": "2025-01-02T10:00:00", "GIT_COMMITTER_DATE": "2025-01-02T10:00:00"}
+        result = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "inicial"],
+                                cwd=folder, env=dict(os.environ, **date), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        branch = self.git(folder, "symbolic-ref", "--short", "HEAD").strip()
+        self.write(os.path.join(folder, "notas.txt"), "sin seguimiento, del usuario\n")
+        self.aw("sync", "repo")
+        ficha = self.read(folder, "MIGRACION.md")
+        self.assertIn(f"- Repositorio git: sí, rama {branch}, sin remoto", ficha)
+        self.assertIn("- Dependencias instaladas (node_modules, venv): sí (node_modules)", ficha)
+        self.assertIn("- Archivos propios con nombres que usa aw, respetados: `CLAUDE.md`", ficha)
+        self.assertIn("- Archivos propios: 3 ", ficha)  # CLAUDE.md, doc.pdf y notas.txt; ni ocultos ni dependencias
+        created = self.created(folder)
+        self.assertEqual(len(created), 25)
+        self.assertNotIn("CLAUDE.md", created)
+        self.assertEqual(self.read(folder, "CLAUDE.md"), "# Instrucciones propias\n")
+        self.assertIn("- Fecha de inicio: 2025-01-02", self.read(folder, "project.md"))
+        self.assertIn("25 archivo(s) creados, 1 propio(s) respetado(s)", self.read(folder, "execution", "run_log.md"))
+        out = self.aw("doctor", "repo").stdout
+        self.assertIn("✓ CLAUDE.md del proyecto presente (propio, no generado por aw)", out)
+        self.assertNotIn("/CLAUDE.md", out)
+        # El bloque completo de doctor deja a la vista solo lo que es del usuario.
+        self.assertIn("Para ignorar todo lo que agregó aw", out)
+        block = out.split("Para ignorar todo lo que agregó aw")[1]
+        patterns = [l.strip() for l in block.splitlines() if re.fullmatch(r"\s*/\S+", l)]
+        for expected in ("/.claude/", "/agents/", "/tasks/", "/project.md", "/MIGRACION.md"):
+            self.assertIn(expected, patterns)
+        with open(os.path.join(folder, ".git", "info", "exclude"), "a", encoding="utf-8") as f:
+            f.write("\n".join(patterns) + "\n")
+        self.assertEqual(self.git(folder, "status", "--short").strip(), "?? notas.txt")
+        self.assertIn("✓ archivos de aw ignorados por git", self.aw("doctor", "repo").stdout)
+
+    def test_doctor_da_el_bloque_de_git_aunque_el_repositorio_se_cree_despues(self):
+        folder = self.loose_folder()
+        self.aw("sync", "suelto")
+        self.assertIn("- Repositorio git: no", self.read(folder, "MIGRACION.md"))
+        self.write(os.path.join(folder, "artifacts", "informe.html"), "<html></html>")  # entregable del usuario
+        self.git(folder, "init", "-q")
+        out = self.aw("doctor", "suelto").stdout
+        self.assertIn("/CLAUDE.md", out)  # el CLAUDE.md que generó aw lleva una ruta de la máquina
+        block = out.split("Para ignorar todo lo que agregó aw")[1]
+        patterns = [l.strip() for l in block.splitlines() if re.fullmatch(r"\s*/\S+", l)]
+        self.assertIn("/agents/", patterns)
+        self.assertIn("/CLAUDE.md", patterns)
+        self.assertNotIn("/artifacts/", patterns)  # ahí hay algo del usuario: se listan solo los archivos de aw
+        self.assertIn("/artifacts/outputs.md", patterns)
+        with open(os.path.join(folder, ".git", "info", "exclude"), "a", encoding="utf-8") as f:
+            f.write("\n".join(patterns) + "\n")
+        self.assertEqual(sorted(self.git(folder, "status", "--short", "-uall").split()),
+                         sorted("?? artifacts/informe.html ?? doc.pdf".split()))
+
+    def test_un_proyecto_que_ya_es_de_aw_no_recibe_ficha(self):
+        project = self.new_project()
+        self.assertFalse(os.path.exists(os.path.join(project, "MIGRACION.md")))
+        os.remove(os.path.join(project, "sop", "rules.md"))
+        out = self.aw("sync", "demo").stdout
+        self.assertIn("- demo: 1 cambio(s)", out)
+        self.assertFalse(os.path.exists(os.path.join(project, "MIGRACION.md")))
+        self.assertNotIn("migrado", self.read(project, "execution", "run_log.md"))
+
+    def test_una_ficha_propia_no_se_reemplaza(self):
+        folder = self.loose_folder()
+        self.write(os.path.join(folder, "MIGRACION.md"), "mi ficha\n")
+        out = self.aw("sync", "suelto").stdout
+        self.assertIn("- suelto: 26 cambio(s)", out)
+        self.assertNotIn("MIGRACION.md", out)
+        self.assertEqual(self.read(folder, "MIGRACION.md"), "mi ficha\n")
+        self.assertIn("proyecto migrado a aw", self.read(folder, "execution", "run_log.md"))
+
+
 class TestDoctor(AwCase):
     def test_proyecto_nuevo_sin_pendientes_graves(self):
         self.new_project()
@@ -1489,8 +1626,9 @@ class TestDoctor(AwCase):
         self.git(project, "init", "-q")
         self.write(os.path.join(project, ".git", "info", "exclude"), "/.claude/\n/state.md\n/context_index.json\n/execution/\n/tools/\n")
         out = self.aw("doctor", "uno").stdout
-        self.assertIn("2 archivo(s) de aw no están ignorados por git", out)
+        self.assertIn("3 archivo(s) de aw no están ignorados por git", out)
         self.assertIn("rutas absolutas", out)
+        self.assertIn("/CLAUDE.md", out)
 
     def test_doctor_avisa_si_el_registro_mensual_no_tiene_cabecera(self):
         self.new_project()
