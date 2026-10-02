@@ -606,7 +606,11 @@ def clean_title(title):
     return DATE_SUFFIX_RE.sub("", title).strip()
 
 
-SENSITIVE_KEY = r"[\w.-]{0,64}(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key)[\w.-]{0,64}"
+# "pass" solo cuenta unido a otra palabra por _ . o - (DB_PASS, pass_file): suelto aparece en salidas de pruebas.
+SENSITIVE_WORD = (r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key"
+                  r"|[_.-]pass(?![A-Za-z])|(?<![A-Za-z])pass[_.-])")
+SENSITIVE_KEY = r"[\w.-]{0,64}" + SENSITIVE_WORD + r"[\w.-]{0,64}"
+AUTH_SCHEME = r"(?:bearer|basic|token|digest|negotiate|api-?key)"
 REDACT_LIMIT = 2000  # caracteres que los hooks pasan a redact como máximo
 LONG_STRING_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])")
 
@@ -620,11 +624,15 @@ def mask_long_string(match):
 
 
 def redact(text):
-    text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:(?:bearer|basic)\s+)?\S+)", r"\1 [oculto]", text)
+    text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:" + AUTH_SCHEME + r"\s+)?\S+)",
+                  r"\1 [oculto]", text)
     text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [oculto]", text)
     text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
     text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
     text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)", r"\1 [oculto]", text)
+    # Opciones de línea de comandos con el valor separado por un espacio: --password x, --api-key x.
+    text = re.sub(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r"[\w-]*)\s+(?!\[oculto\]|-)(?:\"[^\"]*\"|'[^']*'|\S+)",
+                  r"\1 [oculto]", text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
     return LONG_STRING_RE.sub(mask_long_string, text)
 

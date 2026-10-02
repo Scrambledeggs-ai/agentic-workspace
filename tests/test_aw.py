@@ -1665,9 +1665,24 @@ class TestFunciones(AwCase):
         ruta = "/home/usuario/proyectos/agencia/informes/resumen_mensual"
         self.assertEqual(r("leyendo " + ruta), "leyendo " + ruta)
 
+    def test_redact_esquemas_de_authorization_opciones_y_pass(self):
+        r = self.aw_mod.redact
+        for text, secret in (("Authorization: Token abc987xyz", "abc987xyz"),
+                             ("authorization: Digest qwe555", "qwe555"),
+                             ("mysql --password hunter2 -u root", "hunter2"),
+                             ("tool --api-key k123 run", "k123"),
+                             ("tool --db-password 'hunter two' run", "hunter two"),
+                             ("DB_PASS=hunter2", "hunter2"),
+                             ("db.pass: hunter2", "hunter2"),
+                             ("PASS_PHRASE=hunter2", "hunter2")):
+            self.assertNotIn(secret, r(text), text)
+        self.assertEqual(r("mysql --password hunter2 -u root"), "mysql --password [oculto] -u root")
+        self.assertEqual(r("tool --password=hunter2 run"), "tool --password [oculto] run")
+
     def test_redact_no_oculta_de_mas(self):
         r = self.aw_mod.redact
-        for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated"):
+        for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated",
+                     "pass: 3 fail: 0", "tests passed=3", "bypass=1", "--password --verbose"):
             self.assertEqual(r(text), text)
 
     def test_clean_title(self):
