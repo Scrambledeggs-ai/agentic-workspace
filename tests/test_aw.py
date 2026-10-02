@@ -302,6 +302,13 @@ class TestTareas(AwCase):
         self.assertIn("ya está hecha", self.aw("task", "done", "T-001", cwd=project).stderr)
         self.assertIn("ya está hecha", self.aw("task", "start", "T-001", cwd=project).stderr)
 
+    def test_task_sin_subcomando_muestra_el_uso(self):
+        project = self.new_project()
+        for cwd in (project, self.tmp):
+            result = self.aw("task", cwd=cwd)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stderr.strip(), "Uso: aw task add|start|done|list")
+
     def test_los_ids_no_se_reutilizan(self):
         project = self.new_project()
         self.aw("task", "add", "uno", cwd=project)
@@ -891,6 +898,80 @@ class TestSync(AwCase):
         self.assertFalse(os.path.exists(os.path.join(self.ws, "core")), "build() no debe correr con nombres inválidos")
         self.assertEqual(sorted(os.listdir(self.tmp)), before)
 
+    def test_sync_y_doctor_ignoran_carpetas_que_no_son_proyectos(self):
+        self.new_project()
+        extras = (".venv", ".git", "node_modules", "__pycache__")
+        for name in extras:
+            self.write(os.path.join(self.project(name), "paquete", "index.js"), "x")
+        aw = load_aw(self.ws)
+        self.assertEqual(aw.list_projects(), ["demo"])
+        out = self.aw("sync").stdout + self.aw("doctor").stdout
+        for name in extras:
+            self.assertNotIn(name, out)
+            self.assertEqual(os.listdir(self.project(name)), ["paquete"], name)
+        index = json.loads(slurp(os.path.join(self.ws, "memory", "context_index.json")))
+        self.assertEqual(list(index["proyectos"]), ["demo"])
+
+    def test_sync_y_doctor_no_recorren_las_dependencias_del_proyecto(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "src", "app.js"), "x")
+        self.write(os.path.join(project, "node_modules", "paquete", "index.js"), "")
+        self.write(os.path.join(project, "src", "__pycache__", "app.pyc"), "")
+        self.aw("sync")
+        files = json.loads(self.read(project, "context_index.json"))["archivos"]
+        self.assertIn("src/app.js", files)
+        self.assertEqual([f for f in files if "node_modules" in f or "__pycache__" in f], [])
+        self.assertIn("✓ ningún archivo vacío", self.aw("doctor").stdout)
+
+    def test_sync_y_doctor_siguen_con_un_enlace_simbolico_roto(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        os.makedirs(os.path.join(project, "lib", "bin"))
+        os.symlink(os.path.join(self.tmp, "no-existe"), os.path.join(project, "lib", "bin", "roto"))
+        os.symlink(os.path.join(self.tmp, "no-existe.md"), os.path.join(project, "sop", "roto.md"))
+        self.write(os.path.join(project, "lib", "real.txt"), "x")
+        sync = self.aw("sync")
+        self.assertEqual(sync.returncode, 0, sync.stderr)
+        self.assertIn("- b:", sync.stdout)
+        files = json.loads(self.read(project, "context_index.json"))["archivos"]
+        self.assertIn("lib/real.txt", files)
+        self.assertNotIn("lib/bin/roto", files)
+        doctor = self.aw("doctor")
+        self.assertNotIn("Traceback", doctor.stderr)
+        self.assertIn("Proyecto b", doctor.stdout)
+        self.assertIn("Resumen:", doctor.stdout)
+
+    def test_sync_y_doctor_rechazan_la_plantilla_como_proyecto(self):
+        self.new_project()
+        template = self.project("template_project")
+        before = self.snapshot(template)
+        for command in ("sync", "doctor"):
+            result = self.aw(command, "demo", "template_project")
+            self.assertEqual(result.returncode, 2, command)
+            self.assertIn("template_project es la plantilla", result.stderr)
+            self.assertNotIn("demo", result.stdout)
+        self.assertEqual(self.snapshot(template), before)
+
+    def test_sync_con_json_valido_de_otro_tipo_no_se_cae(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        settings = os.path.join(project, ".claude", "settings.json")
+        self.write(os.path.join(project, "context_index.json"), "[]")
+        for text in ("[]", "null", '"texto"'):
+            self.write(settings, text)
+            result = self.aw("sync")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no es un objeto JSON", result.stdout)
+            self.assertIn("- b:", result.stdout)
+            self.assertEqual(slurp(settings), text)
+        self.assertEqual(json.loads(self.read(project, "context_index.json"))["proyecto"], "a")
+        for data in ({"permissions": [], "hooks": []}, {"hooks": {"Stop": [{"hooks": 5}], "SessionEnd": 5}},
+                     {"permissions": {"allow": 5}}):
+            self.write(settings, json.dumps(data))
+            result = self.aw("sync")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("- b:", result.stdout)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")
@@ -927,6 +1008,40 @@ class TestDoctor(AwCase):
         self.assertIn("JSON inválido", self.aw("doctor").stdout)
         os.remove(path)
         self.assertIn("✕ .claude/settings.json no existe", self.aw("doctor").stdout)
+
+    def test_doctor_con_json_valido_de_otro_tipo_no_se_cae(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        settings = os.path.join(project, ".claude", "settings.json")
+        good = slurp(settings)
+        for text in ("[]", "null", '"texto"'):
+            self.write(settings, text)
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("✕ .claude/settings.json no es un objeto JSON", result.stdout)
+            self.assertIn("Proyecto b", result.stdout)
+        for data in ({"permissions": [], "hooks": []}, {"hooks": {"Stop": [{"hooks": 5}], "SessionEnd": 5}},
+                     {"permissions": {"allow": 5}, "hooks": {"Stop": [{"hooks": [{"command": 5}]}]}}):
+            self.write(settings, json.dumps(data))
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("✕ faltan hooks", result.stdout)
+            self.assertIn("Proyecto b", result.stdout)
+        self.write(settings, good)
+        self.write(os.path.join(project, "tools", "assigned_tools.md"),
+                   "# Herramientas\n\n| Herramienta | Uso | Config |\n|---|---|---|\n| Airtable | tablas | .mcp.json |\n")
+        for text in ("[]", "null", '{"mcpServers": [1]}', '{"mcpServers": 5}'):
+            self.write(os.path.join(project, ".mcp.json"), text)
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("herramienta 'Airtable' declarada en .mcp.json pero no figura ahí", result.stdout)
+        index = os.path.join(self.ws, "memory", "context_index.json")
+        for text, expected in (("[]", "memory/context_index.json es inválido"),
+                               ('{"proyectos": [{}]}', "el índice de proyectos no incluye 2 proyecto(s)")):
+            self.write(index, text)
+            result = self.aw("doctor")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(expected, result.stdout)
 
     def test_detecta_estado_manual_y_permisos_faltantes(self):
         project = self.new_project()

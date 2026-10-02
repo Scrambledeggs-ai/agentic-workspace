@@ -159,6 +159,15 @@ def append_text(path, text):
         f.write(text)
 
 
+def as_dict(value):
+    # Un JSON editado a mano puede ser válido y traer otro tipo donde se espera un objeto o una lista.
+    return value if isinstance(value, dict) else {}
+
+
+def as_list(value):
+    return value if isinstance(value, list) else []
+
+
 # -- Plantillas --
 
 def machine_vars():
@@ -368,13 +377,19 @@ def registry_menu(label, folder):
 
 # -- Proyectos --
 
+# Carpetas que dejan las herramientas de desarrollo: no son proyectos ni se recorren dentro de uno.
+HEAVY_DIRS = {"node_modules", "__pycache__"}
+# Carpetas de projects/ que nunca son un proyecto.
+NOT_PROJECTS = {"template_project"} | HEAVY_DIRS
+
+
 def list_projects():
     projects_dir = os.path.join(ROOT, "projects")
     if not os.path.isdir(projects_dir):
         return []
     return sorted(
         p for p in os.listdir(projects_dir)
-        if p != "template_project" and os.path.isdir(os.path.join(projects_dir, p))
+        if p not in NOT_PROJECTS and not p.startswith(".") and os.path.isdir(os.path.join(projects_dir, p))
     )
 
 
@@ -511,6 +526,16 @@ def check_project_name(name):
         raise AwError("Nombre de proyecto inválido.")
 
 
+TEMPLATE_ERROR = "template_project es la plantilla, no un proyecto: no se modifica desde estos comandos."
+
+
+def check_project_names(names):
+    for name in names or []:
+        check_project_name(name)
+        if name == "template_project":
+            raise AwError(TEMPLATE_ERROR)
+
+
 def resolve_project(name=None):
     if name:
         check_project_name(name)
@@ -522,7 +547,7 @@ def resolve_project(name=None):
         if not path:
             raise AwError("No se está dentro de un proyecto aw (carpeta con state.md y tasks/). Usa --project NOMBRE.")
     if os.path.basename(path) == "template_project":
-        raise AwError("template_project es la plantilla, no un proyecto: no se modifica desde estos comandos.")
+        raise AwError(TEMPLATE_ERROR)
     return path
 
 
@@ -886,19 +911,24 @@ def refresh_artifact_indexes(project):
 def refresh_context_index(project):
     files = {}
     for dirpath, dirs, fnames in os.walk(project):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in HEAVY_DIRS)
         for fname in sorted(fnames):
             if fname == "context_index.json" or fname.endswith(".tmp") or fname.startswith(".") or ".bak-" in fname:
                 continue
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, project).replace(os.sep, "/")
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full)).strftime("%Y-%m-%d %H:%M")
-            files[rel] = {"bytes": os.path.getsize(full), "modificado": mtime}
+            try:
+                info = os.stat(full)
+            except OSError:
+                continue  # enlace simbólico roto o archivo que desapareció: no se indexa
+            mtime = datetime.datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M")
+            files[rel] = {"bytes": info.st_size, "modificado": mtime}
     path = pj(project, "context_index.json")
     try:
         current = json.loads(read_text(path) or "{}")
     except ValueError:
         current = {}
+    current = as_dict(current)
     if current.get("archivos") == files and current.get("proyecto") == os.path.basename(project):
         return
     data = {"proyecto": os.path.basename(project), "actualizado": now_str(), "archivos": files}
@@ -1203,7 +1233,7 @@ def merge_settings(existing, template):
                 if not isinstance(current, list):
                     continue
                 installed = [h for g in current if isinstance(g, dict)
-                             for h in (g.get("hooks") or []) if isinstance(h, dict)]
+                             for h in as_list(g.get("hooks")) if isinstance(h, dict)]
                 for group in groups:
                     wanted = [h for h in group.get("hooks", []) if hook_key(h)]
                     keys = {hook_key(h) for h in wanted}
@@ -1232,6 +1262,8 @@ def sync_settings(project, source_text, variables, dry_run):
         existing = json.loads(read_text(dest) or "{}")
     except ValueError:
         return [("omitir", ".claude/settings.json (JSON inválido; no se toca)")]
+    if not isinstance(existing, dict):
+        return [("omitir", ".claude/settings.json (no es un objeto JSON; no se toca)")]
     merged, notes = merge_settings(existing, template)
     if not notes:
         return []
@@ -1275,8 +1307,7 @@ def sync_project(project, template, dry_run=False):
 
 
 def sync_projects(names=None, dry_run=False, workspace=False):
-    for name in names or []:
-        check_project_name(name)
+    check_project_names(names)
     template = os.path.join(ROOT, "projects", "template_project")
     if not dry_run:
         build(ROOT, load_structure())
@@ -1435,11 +1466,15 @@ def doctor_project(project):
 
     empty, fields = [], 0
     for dirpath, dirs, files in os.walk(project):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in HEAVY_DIRS]
         for fname in files:
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, project).replace(os.sep, "/")
-            if os.path.getsize(full) == 0:
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                continue  # enlace simbólico roto o archivo que desapareció
+            if size == 0:
                 empty.append(rel)
             elif rel.endswith(".md") and rel.split("/")[0] in ("project.md", "CLAUDE.md", "agents", "skills", "tools", "sop"):
                 fields += read_text(full).count("(completar)")
@@ -1478,13 +1513,16 @@ def doctor_project(project):
     else:
         try:
             settings = json.loads(read_text(settings_path))
+            if not isinstance(settings, dict):
+                settings = None
+                add("bad", ".claude/settings.json no es un objeto JSON")
         except ValueError:
             settings = None
             add("bad", ".claude/settings.json tiene JSON inválido")
         if settings is not None:
-            hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
-            commands = [h.get("command", "") for groups in hooks.values() if isinstance(groups, list)
-                        for g in groups if isinstance(g, dict) for h in g.get("hooks", []) if isinstance(h, dict)]
+            hooks = as_dict(settings.get("hooks"))
+            commands = [str(h.get("command") or "") for groups in hooks.values() if isinstance(groups, list)
+                        for g in groups if isinstance(g, dict) for h in as_list(g.get("hooks")) if isinstance(h, dict)]
             present = {hook_signature(c) for c in commands}
             absent = [e for e in HOOK_EVENTS if e not in present]
             add("bad" if absent else "ok", ("faltan hooks: " + ", ".join(absent)) if absent else "hooks de aw instalados")
@@ -1493,7 +1531,7 @@ def doctor_project(project):
                 if match and not os.path.exists(match.group(1)):
                     add("bad", f"un hook apunta a un script que no existe: {match.group(1)}")
                     break
-            allow = (settings.get("permissions") or {}).get("allow") or []
+            allow = as_list(as_dict(settings.get("permissions")).get("allow"))
             need = [p for p in ("Bash(aw task *)", "Bash(aw decide *)", "Bash(aw log *)") if p not in allow]
             add("warn" if need else "ok", ("faltan permisos: " + ", ".join(need)) if need else "permisos de aw presentes")
 
@@ -1516,7 +1554,7 @@ def doctor_project(project):
     mcp_names = set()
     try:
         mcp = json.loads(read_text(pj(project, ".mcp.json")) or "{}")
-        mcp_names = {k.lower() for k in (mcp.get("mcpServers") or {})}
+        mcp_names = {k.lower() for k in as_dict(as_dict(mcp).get("mcpServers"))}
     except ValueError:
         pass
     for cells in markdown_rows(read_text(pj(project, "tools", "assigned_tools.md"))):
@@ -1527,8 +1565,7 @@ def doctor_project(project):
 
 
 def doctor(names=None):
-    for name in names or []:
-        check_project_name(name)
+    check_project_names(names)
     symbols = {"ok": "✓", "warn": "▲", "bad": "✕"}
     counts = {"ok": 0, "warn": 0, "bad": 0}
     print("aw doctor")
@@ -1543,7 +1580,7 @@ def doctor(names=None):
         global_checks.append(("warn", "el CLAUDE.md de la raíz no es el del workspace aw: aw no lo gestiona "
                                       "(si es una versión antigua, renómbralo y ejecuta aw init)"))
     try:
-        indexed = set(json.loads(read_text(os.path.join(ROOT, "memory", "context_index.json")) or "{}").get("proyectos") or {})
+        indexed = set(as_dict(json.loads(read_text(os.path.join(ROOT, "memory", "context_index.json")) or "{}").get("proyectos")))
     except (ValueError, AttributeError):
         indexed = None
     if indexed is None:
@@ -1726,6 +1763,8 @@ def dispatch(args):
         target = create_project(args.name, args.desc)
         print(f"Proyecto creado: {target}")
     elif args.cmd == "task":
+        if not args.tcmd:  # sin subcomando, args no trae --project
+            raise AwError("Uso: aw task add|start|done|list")
         project = resolve_project(args.project)
         if args.tcmd == "add":
             task_id, prio = task_add(project, " ".join(args.title), args.prio)
