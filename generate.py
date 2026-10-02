@@ -541,12 +541,17 @@ def check_project_names(names):
             raise AwError(TEMPLATE_ERROR)
 
 
-def resolve_project(name=None):
+def resolve_project(name=None, write=False):
     if name:
         check_project_name(name)
         path = os.path.join(ROOT, "projects", name)
         if not os.path.isdir(path):
             raise AwError(f"No existe el proyecto '{name}'.")
+        # Los comandos de escritura están preaprobados en cada proyecto: desde uno no se escribe en otro.
+        current = find_project()
+        if write and current and os.path.realpath(current) != os.path.realpath(path):
+            raise AwError(f"Dentro del proyecto '{os.path.basename(current)}' no se escribe en '{name}': "
+                          "ejecuta el comando desde ese proyecto o desde fuera de un proyecto.")
     else:
         path = find_project()
         if not path:
@@ -1773,7 +1778,7 @@ def dispatch(args):
     elif args.cmd == "task":
         if not args.tcmd:  # sin subcomando, args no trae --project
             raise AwError("Uso: aw task add|start|done|list")
-        project = resolve_project(args.project)
+        project = resolve_project(args.project, write=args.tcmd != "list")
         if args.tcmd == "add":
             task_id, prio = task_add(project, " ".join(args.title), args.prio)
             print(f"{task_id} creada [{prio}]")
@@ -1788,11 +1793,11 @@ def dispatch(args):
         else:
             raise AwError("Uso: aw task add|start|done|list")
     elif args.cmd == "decide":
-        project = resolve_project(args.project)
+        project = resolve_project(args.project, write=True)
         decide(project, " ".join(args.title), args.why, args.alt)
         print("Decisión registrada.")
     elif args.cmd == "log":
-        project = resolve_project(args.project)
+        project = resolve_project(args.project, write=True)
         log_event(project, "nota", " ".join(args.text))
         refresh_state(project)
         print("Nota registrada.")

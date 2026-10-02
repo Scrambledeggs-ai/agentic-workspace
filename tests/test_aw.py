@@ -350,6 +350,25 @@ class TestTareas(AwCase):
         self.assertEqual(self.aw("task", "add", "por nombre", "--project", "demo", cwd=self.tmp).returncode, 0)
         self.assertIn("por nombre", self.read(project, "tasks", "backlog.md"))
 
+    def test_dentro_de_un_proyecto_no_se_escribe_en_otro(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        other = self.project("b")
+        self.aw("task", "add", "tarea de b", cwd=other)
+        before = {name: self.read(other, *name.split("/")) for name in
+                  ("tasks/backlog.md", "tasks/active.md", "tasks/done.md", "execution/decisions.md", "execution/run_log.md")}
+        sub = os.path.join(project, "sop")
+        for args in (("task", "add", "x"), ("task", "start", "T-001"), ("task", "done", "T-001"),
+                     ("decide", "x", "--why", "y"), ("log", "x")):
+            result = self.aw(*args, "--project", "b", cwd=sub)
+            self.assertEqual(result.returncode, 2, args)
+            self.assertIn("no se escribe en 'b'", result.stderr)
+        self.assertEqual({name: self.read(other, *name.split("/")) for name in before}, before)
+        # Leer otro proyecto, nombrar el propio y escribir desde fuera de un proyecto sigue permitido.
+        self.assertIn("tarea de b", self.aw("task", "list", "--project", "b", cwd=project).stdout)
+        self.assertEqual(self.aw("task", "add", "propia", "--project", "a", cwd=sub).returncode, 0)
+        self.assertEqual(self.aw("log", "desde la raíz", "--project", "b", cwd=self.ws).returncode, 0)
+
     def test_state_a_mano_que_menciona_la_marca_no_se_regenera(self):
         project = self.new_project()
         manual = "Estado: mío\nRecordatorio: los archivos con aw:auto los genera aw\n"
