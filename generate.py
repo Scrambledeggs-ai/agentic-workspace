@@ -1446,7 +1446,7 @@ def migration_facts(project):
             count += 1
             oldest = mtime if oldest is None else min(oldest, mtime)
     oldest_date = datetime.date.fromtimestamp(oldest).isoformat() if oldest is not None else None
-    deps = sorted(d for d in os.listdir(project) if d in HEAVY_DIRS | {".venv"} and os.path.isdir(pj(project, d)))
+    deps = [d for d in ("node_modules", "venv", ".venv") if os.path.isdir(pj(project, d))]
     git, first_commit = "no", None
     top = run_git(project, "rev-parse", "--show-toplevel")
     if top and top.returncode == 0 and top.stdout.strip():
@@ -1464,7 +1464,7 @@ def migration_facts(project):
             "inicio": min(first_commit or oldest_date or today(), today())}
 
 
-def migration_text(name, project, facts, created, kept):
+def migration_text(name, project, facts, created, kept, merged_settings):
     own = (f"{facts['propios']} (el más antiguo, del {facts['antiguo']})" if facts["propios"]
            else "ninguno (la carpeta estaba vacía)")
     deps = "sí (" + ", ".join(facts["dependencias"]) + ")" if facts["dependencias"] else "no"
@@ -1480,6 +1480,8 @@ def migration_text(name, project, facts, created, kept):
         f"- Repositorio git: {facts['git']}",
         f"- Dependencias instaladas (node_modules, venv): {deps}",
         f"- Archivos propios con nombres que usa aw, respetados: {respected}",
+        *(["- `.claude/settings.json` ya existía: aw le agrega sus hooks y permisos y guarda un respaldo al lado"]
+          if merged_settings else []),
         "",
         "## Archivos creados por aw",
         AUTO_START,
@@ -1489,7 +1491,8 @@ def migration_text(name, project, facts, created, kept):
         "## Después de migrar",
         f"1. Ejecuta `aw doctor {name}`: revisa el resultado y, si el proyecto tiene git, da las líneas para que git "
         "ignore lo que agregó aw.",
-        "2. Completa `project.md` (cliente, objetivo, alcance) y revisa la fecha de inicio.",
+        "2. Completa `project.md` (cliente, objetivo, alcance) y revisa la fecha de inicio: es una estimación, tomada "
+        "del primer commit o del archivo más antiguo.",
         "3. Abre una sesión de Claude Code dentro del proyecto: el resumen del estado se carga solo.",
         "",
         "## Notas",
@@ -1509,45 +1512,54 @@ def migration_created(project):
     return [rel for rel in found if not os.path.isabs(rel) and ".." not in rel.split("/")]
 
 
+def is_untouched_by_aw(project):
+    # Una carpeta que aw todavía no convirtió en proyecto. No basta con que falte state.md: es un archivo
+    # generado, que puede estar ignorado en git o haberse borrado en un proyecto que ya es de aw.
+    return not any(os.path.exists(pj(project, name)) for name in ("state.md", "tasks", "execution"))
+
+
 def sync_project(project, sources, dry_run=False):
     name = os.path.basename(project)
     variables = project_vars(name, "")
-    # Una carpeta que todavía no es un proyecto aw: además de los archivos, se deja constancia de la migración.
-    migrating = not is_project_dir(project)
-    facts = migration_facts(project) if migrating else None
-    if migrating:
-        variables["DATE"] = facts["inicio"]
-    changes, kept = [], []
+    migrating = is_untouched_by_aw(project)
+    # Qué se va a hacer con cada archivo de la plantilla, antes de escribir nada.
+    plan, kept, merged_settings = [], [], False
     for rel in sorted(sources, key=walk_order):
-        source_text = sources[rel]
         dest = pj(project, *rel.split("/"))
         if rel == ".claude/settings.json":
-            if os.path.exists(dest):
-                kept.append(rel)
-            changes += sync_settings(project, repo_settings_text() or source_text, variables, dry_run)
-            continue
-        if not source_text.strip():
+            merged_settings = os.path.exists(dest)
+            plan.append(("settings" if merged_settings else "crear", rel))
+        elif not sources[rel].strip():
             continue  # la plantilla aún no tiene contenido para este archivo
-        if not os.path.exists(dest):
-            action = "crear"
+        elif not os.path.exists(dest):
+            plan.append(("crear", rel))
         elif os.path.getsize(dest) == 0:
-            action = "rellenar"
+            plan.append(("rellenar", rel))
         else:
             kept.append(rel)
+    created = [rel for action, rel in plan if action == "crear"]
+    ficha = pj(project, MIGRATION_FILE)
+    write_ficha = migrating and bool(created) and not os.path.exists(ficha)  # una ficha que ya estaba es del usuario
+    if migrating and not dry_run:
+        # La ficha se escribe antes que los archivos: si la sincronización se corta, la lista de lo que crea aw
+        # ya quedó guardada y repetir el comando completa lo que falte.
+        facts = migration_facts(project)
+        variables["DATE"] = facts["inicio"]
+        if write_ficha:
+            write_text(ficha, migration_text(name, project, facts, created, kept, merged_settings))
+    changes = []
+    for action, rel in plan:
+        if rel == ".claude/settings.json":
+            changes += sync_settings(project, repo_settings_text() or sources[rel], variables, dry_run)
             continue
         changes.append((action, rel))
         if not dry_run:
-            write_text(dest, render(source_text, variables, json_safe=rel.lower().endswith(".json")))
-    if migrating and changes:
-        created = [rel for action, rel in changes if action == "crear"]
-        ficha = pj(project, MIGRATION_FILE)
-        if not os.path.exists(ficha):  # una ficha que ya estaba es del usuario: no se reemplaza
-            changes.append(("crear", MIGRATION_FILE))
-            if not dry_run:
-                write_text(ficha, migration_text(name, project, facts, created, kept))
-        if not dry_run:
-            log_event(project, "nota", f"proyecto migrado a aw: {len(created)} archivo(s) creados, "
-                                       f"{len(kept)} propio(s) respetado(s)")
+            write_text(pj(project, *rel.split("/")), render(sources[rel], variables, json_safe=rel.lower().endswith(".json")))
+    if write_ficha:
+        changes.append(("crear", MIGRATION_FILE))
+    if migrating and changes and not dry_run:
+        log_event(project, "nota", f"proyecto migrado a aw: {len(created)} archivo(s) creados, "
+                                   f"{len(kept)} propio(s) respetado(s)")
     if not dry_run:
         refresh_state(project)
         refresh_artifact_indexes(project)
@@ -1640,17 +1652,17 @@ def run_git(project, *args):
     return result if result.returncode in (0, 1) else None
 
 
-def is_aw_claude_md(project):
-    # El CLAUDE.md que genera aw para un proyecto lleva la ruta del workspace; uno propio del proyecto no cuenta.
+def project_claude_md(project):
     try:
-        text = read_text(pj(project, "CLAUDE.md"))
+        return read_text(pj(project, "CLAUDE.md"))
     except AwError:
-        return False
-    return text.startswith("# CLAUDE.md — ") and "ni el protocolo aw" in text[:600]
+        return ""
 
 
 def aw_local_files(project):
-    return list(AW_LOCAL_FILES) + (["CLAUDE.md"] if is_aw_claude_md(project) else [])
+    # A la lista fija se suma el CLAUDE.md del proyecto solo si contiene la ruta de este workspace (los que generó
+    # una versión anterior de aw la llevan); uno sin esa ruta es contenido del proyecto.
+    return list(AW_LOCAL_FILES) + (["CLAUDE.md"] if ROOT in project_claude_md(project) else [])
 
 
 def git_exposure(project, files=None):
@@ -1672,6 +1684,7 @@ def git_exposure(project, files=None):
     ignored = set(ignored_run.stdout.split("\n")) if ignored_run else set()
     return {
         "total": len(present),
+        "presentes": present,
         "versionados": [f for f in present if f in tracked],
         "expuestos": [f for f in untracked if f not in ignored],
         "prefijo": lines[1],
@@ -1679,67 +1692,50 @@ def git_exposure(project, files=None):
     }
 
 
-def exclude_patterns(exposure):
+def exclude_patterns(prefix, files):
     patterns = []
-    for f in exposure["expuestos"]:
-        pattern = "/" + exposure["prefijo"] + (".claude/settings.json.bak-*" if f.startswith(".claude/settings.json.bak-") else f)
-        if pattern not in patterns:
-            patterns.append(pattern)
-    return patterns
-
-
-def full_exclude_patterns(project, created):
-    # Las líneas para ignorar todo lo que agregó aw: la carpeta entera si todo lo que hay en ella es de aw, y
-    # archivo por archivo si el usuario ya puso algo propio ahí.
-    known = set(created) | set(aw_local_files(project)) | {MIGRATION_FILE}
-    exposure = git_exposure(project, sorted(known))
-    if not exposure:
-        return []
-    only_aw = {}
-
-    def all_from_aw(top):
-        if top not in only_aw:
-            only_aw[top] = all(
-                os.path.relpath(os.path.join(dirpath, fname), project).replace(os.sep, "/") in known
-                or fname.startswith("settings.json.bak-")
-                for dirpath, _dirs, fnames in os.walk(pj(project, top)) for fname in fnames)
-        return only_aw[top]
-
-    patterns = []
-    for rel in exposure["expuestos"]:
-        top = rel.split("/")[0]
-        pattern = "/" + exposure["prefijo"] + (top + "/" if "/" in rel and all_from_aw(top) else rel)
+    for f in files:
+        pattern = "/" + prefix + (".claude/settings.json.bak-*" if f.startswith(".claude/settings.json.bak-") else f)
         if pattern not in patterns:
             patterns.append(pattern)
     return patterns
 
 
 def doctor_git(project):
-    exposure = git_exposure(project)
-    if exposure is None or not exposure["total"]:
+    local = aw_local_files(project)
+    created = migration_created(project)
+    # Con ficha de migración se mira también todo lo que creó aw, para poder ofrecer ignorarlo completo.
+    others = sorted((set(created) | {MIGRATION_FILE}) - set(local)) if created else []
+    exposure = git_exposure(project, local + others)
+
+    def is_local(f):
+        return f in local or f.startswith(".claude/settings.json.bak-")
+
+    if exposure is None or not any(is_local(f) for f in exposure["presentes"]):
         return []
-    exposed, tracked = exposure["expuestos"], exposure["versionados"]
+    exposed = [f for f in exposure["expuestos"] if is_local(f)]
+    tracked = [f for f in exposure["versionados"] if is_local(f)]
     results = []
     if exposed:
         text = f"{len(exposed)} archivo(s) de aw no están ignorados por git y un `git add .` los incluiría: {', '.join(exposed)}."
         if any(f.startswith(".claude/settings.json") or "/assigned_" in f or f == "CLAUDE.md" for f in exposed):
             with_paths = ".claude/settings.json y las notas assigned_*"
             if "CLAUDE.md" in exposed:
-                with_paths = ".claude/settings.json, las notas assigned_* y el CLAUDE.md que generó aw"
+                with_paths = ".claude/settings.json, las notas assigned_* y el CLAUDE.md"
             text += f"\n{with_paths} llevan rutas absolutas de tu máquina; el resto es estado generado."
         text += f"\nPara ignorarlos solo en local, añade estas líneas a {exposure['exclude']}:"
-        text += "".join(f"\n  {pattern}" for pattern in exclude_patterns(exposure))
+        text += "".join(f"\n  {pattern}" for pattern in exclude_patterns(exposure["prefijo"], exposed))
         text += "\ntasks/, decisions.md, project.md y el resto de tu contenido no están en la lista: versionarlos es decisión tuya."
-        created = migration_created(project)
-        everything = full_exclude_patterns(project, created) if created else []
-        if everything:
+        if created:
+            # Archivo por archivo, sin carpetas enteras: lo que el usuario agregue después en ellas sigue a la vista.
             text += f"\nPara ignorar todo lo que agregó aw al migrar (según {MIGRATION_FILE}), usa estas líneas en su lugar:"
-            text += "".join(f"\n  {pattern}" for pattern in everything)
-        results.append(("warn", text))
+            text += "".join(f"\n  {pattern}" for pattern in exclude_patterns(exposure["prefijo"], exposure["expuestos"]))
     if tracked:
         results.append(("warn", f"{len(tracked)} archivo(s) de aw ya están versionados en git: {', '.join(tracked)}. "
                                 f"Contienen rutas de tu máquina o son estado generado; para dejar de versionarlos usa "
                                 f"`git rm --cached <archivo>` y añádelos a {exposure['exclude']}."))
+    if exposed:
+        results.insert(0, ("warn", text))
     if not exposed and not tracked:
         results.append(("ok", "archivos de aw ignorados por git"))
     return results
@@ -1858,7 +1854,8 @@ def doctor_project(project):
     for level, text in doctor_git(project):
         add(level, text)
 
-    own_claude_md = os.path.exists(pj(project, "CLAUDE.md")) and not is_aw_claude_md(project)
+    # El que genera aw empieza con "# CLAUDE.md — <proyecto>"; cualquier otro es propio del proyecto.
+    own_claude_md = os.path.exists(pj(project, "CLAUDE.md")) and not project_claude_md(project).startswith("# CLAUDE.md — ")
     add(*check(os.path.exists(pj(project, "CLAUDE.md")),
                "CLAUDE.md del proyecto presente" + (" (propio, no generado por aw)" if own_claude_md else ""),
                "falta el CLAUDE.md del proyecto (aw sync lo crea)"))

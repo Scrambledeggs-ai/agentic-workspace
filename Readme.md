@@ -135,13 +135,13 @@ aw sync NOMBRE
 aw doctor NOMBRE
 ```
 
-`aw sync` crea solo lo que falta y nunca reemplaza un archivo que ya tiene contenido: si el proyecto trae su propio `CLAUDE.md` o su carpeta `.claude/`, quedan como estaban. Al convertir la carpeta en proyecto, además:
+`aw sync` crea solo lo que falta y nunca reemplaza un archivo que ya tiene contenido: si el proyecto trae su propio `CLAUDE.md`, `memory.md` o archivos en `.claude/`, quedan como estaban. La única excepción es un `.claude/settings.json` que ya exista: aw le agrega sus hooks y permisos y guarda un respaldo al lado. Al convertir la carpeta en proyecto, además:
 
 * escribe `MIGRACION.md` en la raíz, con el estado inicial de la carpeta y la lista de los archivos que creó;
 * deja una entrada en el registro de ejecución;
-* pone en `project.md` la fecha de inicio real: la del primer commit o, si no hay git, la del archivo más antiguo.
+* pone en `project.md` una fecha de inicio estimada: la del primer commit o, si no hay git, la del archivo más antiguo. Conviene revisarla.
 
-Si el proyecto es un repositorio git, `aw doctor NOMBRE` da las líneas para que git ignore lo que agregó aw, ahora o cuando se cree el repositorio.
+Si el proyecto es un repositorio git, `aw doctor NOMBRE` da las líneas para que git ignore lo que agregó aw, ahora o cuando se cree el repositorio. Las da archivo por archivo, sin carpetas enteras, para que lo que se agregue después en `artifacts/` o `tasks/` siga a la vista de git.
 
 La plantilla de proyectos (`projects/template_project`) solo lleva archivos `.md` y `.json`: son los únicos que aw interpreta. Cualquier otro archivo que se ponga ahí se ignora, tanto al crear un proyecto como al sincronizar.
 

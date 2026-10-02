@@ -1382,12 +1382,17 @@ class TestMigracion(AwCase):
         self.assertIn("Para ignorar todo lo que agregó aw", out)
         block = out.split("Para ignorar todo lo que agregó aw")[1]
         patterns = [l.strip() for l in block.splitlines() if re.fullmatch(r"\s*/\S+", l)]
-        for expected in ("/.claude/", "/agents/", "/tasks/", "/project.md", "/MIGRACION.md"):
+        for expected in ("/.claude/settings.json", "/agents/agent_context.md", "/tasks/backlog.md", "/project.md",
+                         "/MIGRACION.md"):
             self.assertIn(expected, patterns)
+        self.assertEqual([p for p in patterns if p.endswith("/")], [])  # archivo por archivo, sin carpetas enteras
         with open(os.path.join(folder, ".git", "info", "exclude"), "a", encoding="utf-8") as f:
             f.write("\n".join(patterns) + "\n")
         self.assertEqual(self.git(folder, "status", "--short").strip(), "?? notas.txt")
         self.assertIn("✓ archivos de aw ignorados por git", self.aw("doctor", "repo").stdout)
+        # Lo que el usuario agregue después en una carpeta de aw sigue a la vista de git.
+        self.write(os.path.join(folder, "artifacts", "informe.html"), "<html></html>")
+        self.assertIn("artifacts/informe.html", self.git(folder, "status", "--short", "-uall"))
 
     def test_doctor_da_el_bloque_de_git_aunque_el_repositorio_se_cree_despues(self):
         folder = self.loose_folder()
@@ -1396,17 +1401,65 @@ class TestMigracion(AwCase):
         self.write(os.path.join(folder, "artifacts", "informe.html"), "<html></html>")  # entregable del usuario
         self.git(folder, "init", "-q")
         out = self.aw("doctor", "suelto").stdout
-        self.assertIn("/CLAUDE.md", out)  # el CLAUDE.md que generó aw lleva una ruta de la máquina
         block = out.split("Para ignorar todo lo que agregó aw")[1]
         patterns = [l.strip() for l in block.splitlines() if re.fullmatch(r"\s*/\S+", l)]
-        self.assertIn("/agents/", patterns)
         self.assertIn("/CLAUDE.md", patterns)
-        self.assertNotIn("/artifacts/", patterns)  # ahí hay algo del usuario: se listan solo los archivos de aw
         self.assertIn("/artifacts/outputs.md", patterns)
+        self.assertNotIn("/artifacts/", patterns)
+        self.assertNotIn("/artifacts/informe.html", patterns)
         with open(os.path.join(folder, ".git", "info", "exclude"), "a", encoding="utf-8") as f:
             f.write("\n".join(patterns) + "\n")
         self.assertEqual(sorted(self.git(folder, "status", "--short", "-uall").split()),
                          sorted("?? artifacts/informe.html ?? doc.pdf".split()))
+
+    def test_un_proyecto_de_aw_sin_state_md_no_se_toma_por_una_migracion(self):
+        # state.md es un archivo generado: puede estar ignorado en git o haberse borrado.
+        project = self.new_project()
+        os.remove(os.path.join(project, "state.md"))
+        out = self.aw("sync", "demo").stdout
+        self.assertIn("crear: state.md", out)
+        self.assertNotIn("MIGRACION.md", out)
+        self.assertFalse(os.path.exists(os.path.join(project, "MIGRACION.md")))
+        self.assertNotIn("migrado", self.read(project, "execution", "run_log.md"))
+
+    def test_si_la_migracion_se_corta_la_ficha_ya_quedo_escrita(self):
+        folder = self.loose_folder()
+        aw = load_aw(self.ws)
+        aw.build(self.ws, aw.load_structure())
+        sources = aw.template_sources(os.path.join(self.ws, "projects", "template_project"))
+        original, state = aw.write_text, {"n": 0}
+
+        def cut(path, text):
+            state["n"] += 1
+            if state["n"] == 12:
+                raise Corte()
+            original(path, text)
+
+        aw.write_text = cut
+        with self.assertRaises(Corte):
+            aw.sync_project(folder, sources)
+        aw.write_text = original
+        self.assertTrue(os.path.isdir(os.path.join(folder, "tasks")) or os.path.exists(os.path.join(folder, "state.md")))
+        created = self.created(folder)
+        self.assertEqual(len(created), 26)
+        self.assertTrue(any(not os.path.exists(os.path.join(folder, *rel.split("/"))) for rel in created))
+        self.aw("sync", "suelto")  # repetir el comando completa lo que faltaba
+        for rel in created:
+            self.assertTrue(os.path.isfile(os.path.join(folder, *rel.split("/"))), rel)
+        self.assertEqual(self.created(folder), created)
+
+    def test_un_settings_propio_no_figura_como_respetado(self):
+        folder = self.loose_folder()
+        self.write(os.path.join(folder, ".claude", "settings.json"), json.dumps({"permissions": {"allow": ["Bash(ls)"]}}))
+        self.write(os.path.join(folder, "__pycache__", "x.pyc"), "x")
+        out = self.aw("sync", "suelto").stdout
+        self.assertIn("actualizar: .claude/settings.json", out)
+        ficha = self.read(folder, "MIGRACION.md")
+        self.assertIn("- Archivos propios con nombres que usa aw, respetados: ninguno", ficha)
+        self.assertIn("- `.claude/settings.json` ya existía: aw le agrega sus hooks y permisos y guarda un respaldo", ficha)
+        self.assertNotIn(".claude/settings.json", self.created(folder))
+        self.assertIn("Bash(ls)", json.loads(self.read(folder, ".claude", "settings.json"))["permissions"]["allow"])
+        self.assertIn("- Dependencias instaladas (node_modules, venv): no", ficha)  # __pycache__ no es una dependencia
 
     def test_un_proyecto_que_ya_es_de_aw_no_recibe_ficha(self):
         project = self.new_project()
@@ -1626,8 +1679,14 @@ class TestDoctor(AwCase):
         self.git(project, "init", "-q")
         self.write(os.path.join(project, ".git", "info", "exclude"), "/.claude/\n/state.md\n/context_index.json\n/execution/\n/tools/\n")
         out = self.aw("doctor", "uno").stdout
-        self.assertIn("3 archivo(s) de aw no están ignorados por git", out)
+        self.assertIn("2 archivo(s) de aw no están ignorados por git", out)
         self.assertIn("rutas absolutas", out)
+        self.assertNotIn("/CLAUDE.md", out)  # el CLAUDE.md que genera aw ya no lleva la ruta del workspace
+        self.assertNotIn(self.ws, self.read(project, "CLAUDE.md"))
+        # Uno generado por una versión anterior sí la lleva: cuenta como archivo local.
+        self.write(os.path.join(project, "CLAUDE.md"), f"# CLAUDE.md — uno\n<!-- ver {self.ws}/CLAUDE.md -->\n")
+        out = self.aw("doctor", "uno").stdout
+        self.assertIn("3 archivo(s) de aw no están ignorados por git", out)
         self.assertIn("/CLAUDE.md", out)
 
     def test_doctor_avisa_si_el_registro_mensual_no_tiene_cabecera(self):
