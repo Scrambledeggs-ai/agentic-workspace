@@ -3,6 +3,7 @@
 Cada prueba trabaja en un workspace temporal (AW_HOME) y en un TMPDIR propio,
 así que nunca toca el workspace real ni los archivos de sesión reales.
 """
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -349,6 +350,25 @@ class TestTareas(AwCase):
         self.assertEqual(self.aw("task", "add", "por nombre", "--project", "demo", cwd=self.tmp).returncode, 0)
         self.assertIn("por nombre", self.read(project, "tasks", "backlog.md"))
 
+    def test_dentro_de_un_proyecto_no_se_escribe_en_otro(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        other = self.project("b")
+        self.aw("task", "add", "tarea de b", cwd=other)
+        before = {name: self.read(other, *name.split("/")) for name in
+                  ("tasks/backlog.md", "tasks/active.md", "tasks/done.md", "execution/decisions.md", "execution/run_log.md")}
+        sub = os.path.join(project, "sop")
+        for args in (("task", "add", "x"), ("task", "start", "T-001"), ("task", "done", "T-001"),
+                     ("decide", "x", "--why", "y"), ("log", "x")):
+            result = self.aw(*args, "--project", "b", cwd=sub)
+            self.assertEqual(result.returncode, 2, args)
+            self.assertIn("no se escribe en 'b'", result.stderr)
+        self.assertEqual({name: self.read(other, *name.split("/")) for name in before}, before)
+        # Leer otro proyecto, nombrar el propio y escribir desde fuera de un proyecto sigue permitido.
+        self.assertIn("tarea de b", self.aw("task", "list", "--project", "b", cwd=project).stdout)
+        self.assertEqual(self.aw("task", "add", "propia", "--project", "a", cwd=sub).returncode, 0)
+        self.assertEqual(self.aw("log", "desde la raíz", "--project", "b", cwd=self.ws).returncode, 0)
+
     def test_state_a_mano_que_menciona_la_marca_no_se_regenera(self):
         project = self.new_project()
         manual = "Estado: mío\nRecordatorio: los archivos con aw:auto los genera aw\n"
@@ -474,6 +494,19 @@ class TestHooks(AwCase):
             result = self.hook(event, {"session_id": "z", "cwd": self.tmp}, self.tmp)
             self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""), event)
 
+    def test_el_proyecto_de_la_sesion_manda_sobre_el_cwd_del_evento(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        other = self.project("b")
+        self.env["CLAUDE_PROJECT_DIR"] = project
+        self.hook("pre-compact", self.payload(other, trigger="auto"), other)
+        self.assertIn("[compactación] auto", self.read(project, "execution", "run_log.md"))
+        self.assertNotIn("[compactación]", self.read(other, "execution", "run_log.md"))
+        # Si la sesión no se abrió dentro de un proyecto, sigue valiendo el cwd del evento.
+        self.env["CLAUDE_PROJECT_DIR"] = self.ws
+        self.hook("pre-compact", self.payload(other, trigger="manual"), other)
+        self.assertIn("[compactación] manual", self.read(other, "execution", "run_log.md"))
+
     def test_hooks_no_tocan_la_plantilla(self):
         self.new_project()
         template = os.path.join(self.ws, "projects", "template_project")
@@ -519,6 +552,17 @@ class TestHooks(AwCase):
         text = self.read(project, "execution", "errors.md")
         self.assertNotIn("abc123SECRETVALUE", text)
         self.assertNotIn("hunter2", text)
+
+    def test_tool_failure_acota_la_linea_antes_de_ocultar_secretos(self):
+        # redact es cuadrático con cadenas largas sin espacios: una línea enorme agotaría el timeout del hook.
+        project = self.new_project()
+        aw = load_aw(self.ws)
+        seen = []
+        original = aw.redact
+        aw.redact = lambda text: seen.append(len(text)) or original(text)
+        aw.hook_tool_failure(self.payload(project, tool_name="Bash", error="a." * 50000), project)
+        self.assertLessEqual(max(seen), 2000)
+        self.assertIn("[Bash] a.a.a.", self.read(project, "execution", "errors.md"))
 
     def test_tool_failure_une_codigo_de_salida_con_el_motivo(self):
         # Formato real que entrega Claude Code: "Exit code N" en la primera línea y el motivo en la segunda.
@@ -736,6 +780,23 @@ class TestSync(AwCase):
         self.assertIn("crear: .claude/settings.json", result.stdout)
         self.assertIn("rellenar: tasks/backlog.md", result.stdout)
         self.assertEqual(self.snapshot(project), snapshot)
+
+    def test_dry_run_anticipa_lo_que_sync_trae_de_la_plantilla_del_repo(self):
+        # La plantilla del workspace quedó atrás (le falta un archivo): sync la completa antes de comparar.
+        project = self.new_project()
+        rel = os.path.join("skills", "assigned_skills.md")
+        os.remove(os.path.join(self.project("template_project"), rel))
+        os.remove(os.path.join(project, rel))
+        snapshot = self.snapshot(self.ws)
+        dry = self.aw("sync", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("crear: skills/assigned_skills.md", dry.stdout)
+        self.assertEqual(self.snapshot(self.ws), snapshot)
+        self.assertEqual(os.listdir(self.sessions), [])
+        real = self.aw("sync")
+        changes = [line for line in dry.stdout.splitlines() if line.startswith("    ")]
+        self.assertEqual(changes, [line for line in real.stdout.splitlines() if line.startswith("    ")])
+        self.assertTrue(os.path.isfile(os.path.join(project, rel)))
 
     def snapshot(self, project):
         data = {}
@@ -1398,6 +1459,23 @@ class TestSettingsDesdeLaPlantilla(AwCase):
         self.assertNotIn("✕", out)
 
 
+    def test_un_proyecto_nuevo_recibe_los_hooks_y_permisos_actuales_aunque_la_plantilla_este_atrasada(self):
+        self.init()
+        template = os.path.join(self.ws, "projects", "template_project", ".claude", "settings.json")
+        self.strip_new_dirs(template)
+        settings = json.loads(slurp(template))
+        del settings["hooks"]["Stop"]
+        settings["permissions"]["allow"] = []
+        self.write(template, json.dumps(settings))
+        self.aw("project", "new", "nuevo")
+        claude_dir = os.path.join(self.project("nuevo"), ".claude")
+        self.assertEqual(len(self.dirs(os.path.join(claude_dir, "settings.json"))), 5)
+        self.assertEqual([f for f in os.listdir(claude_dir) if ".bak-" in f], [])
+        out = self.aw("doctor", "nuevo").stdout
+        self.assertIn("✓ hooks de aw instalados", out)
+        self.assertIn("✓ permisos de aw presentes", out)
+
+
 class Corte(Exception):
     """Simula que el proceso se corta a mitad de una operación."""
 
@@ -1516,6 +1594,20 @@ class TestBloqueoYAtomicidad(AwCase):
         holder.stdin.close()
         holder.wait(timeout=10)
 
+    def test_create_project_no_deja_una_carpeta_a_medias_si_falla(self):
+        self.init()
+        original = self.aw_mod.render_tree
+
+        def cut(*_args):
+            raise Corte()
+
+        self.aw_mod.render_tree = cut
+        with self.assertRaises(Corte):
+            self.aw_mod.create_project("uno")
+        self.assertFalse(os.path.exists(self.project("uno")))
+        self.aw_mod.render_tree = original
+        self.assertTrue(os.path.isdir(self.aw_mod.create_project("uno")))  # el nombre queda libre para reintentar
+
     def test_project_lock_es_reentrante(self):
         project = self.new_project()
         self.aw_mod.LOCK_TIMEOUT = 0.3  # si no fuera reentrante, fallaría en 0,3 s en vez de colgarse
@@ -1558,6 +1650,39 @@ class TestFunciones(AwCase):
         self.assertEqual(r("Could not resolve host"), "Could not resolve host")
         self.assertEqual(r("invalid token provided"), "invalid token provided")
 
+    def test_sh_quote_protege_los_caracteres_que_el_shell_interpreta(self):
+        quote = self.aw_mod.sh_quote
+        self.assertEqual(quote("/ruta con espacios/generate.py"), '"/ruta con espacios/generate.py"')
+        for path in ('/a/$HOME/generate.py', '/a/"b"/generate.py', "/a/`id`/generate.py", "/a/b\\c/it's/generate.py"):
+            result = subprocess.run(["sh", "-c", "printf %s " + quote(path)], capture_output=True, text=True)
+            self.assertEqual(result.stdout, path)
+        self.assertEqual(self.aw_mod.machine_vars()["AW_CMD"], "python3 " + quote(SCRIPT))
+
+    def test_el_instalador_no_escribe_a_traves_de_un_enlace_simbolico(self):
+        home = os.path.join(self.tmp, "home")
+        bin_dir = os.path.join(home, ".local", "bin")
+        victim = os.path.join(self.tmp, "victima.txt")
+        self.write(victim, "intacto")
+        os.makedirs(bin_dir)
+        wrapper = os.path.join(bin_dir, "aw")
+        os.symlink(victim, wrapper)
+        previous = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        try:
+            with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+                self.aw_mod.action_install_command()
+        finally:
+            if previous is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous
+        self.assertEqual(slurp(victim), "intacto")
+        self.assertFalse(os.path.islink(wrapper))
+        self.assertIn("exec python3 " + self.aw_mod.sh_quote(SCRIPT), slurp(wrapper))
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        result = subprocess.run([wrapper, "task"], capture_output=True, text=True, env=self.env)
+        self.assertIn("Uso: aw task", result.stderr)
+
     def test_redact_claves_con_prefijo_sufijo_o_comillas(self):
         r = self.aw_mod.redact
         for text, secret in (("DB_PASSWORD=hunter2", "hunter2"),
@@ -1588,9 +1713,24 @@ class TestFunciones(AwCase):
         ruta = "/home/usuario/proyectos/agencia/informes/resumen_mensual"
         self.assertEqual(r("leyendo " + ruta), "leyendo " + ruta)
 
+    def test_redact_esquemas_de_authorization_opciones_y_pass(self):
+        r = self.aw_mod.redact
+        for text, secret in (("Authorization: Token abc987xyz", "abc987xyz"),
+                             ("authorization: Digest qwe555", "qwe555"),
+                             ("mysql --password hunter2 -u root", "hunter2"),
+                             ("tool --api-key k123 run", "k123"),
+                             ("tool --db-password 'hunter two' run", "hunter two"),
+                             ("DB_PASS=hunter2", "hunter2"),
+                             ("db.pass: hunter2", "hunter2"),
+                             ("PASS_PHRASE=hunter2", "hunter2")):
+            self.assertNotIn(secret, r(text), text)
+        self.assertEqual(r("mysql --password hunter2 -u root"), "mysql --password [oculto] -u root")
+        self.assertEqual(r("tool --password=hunter2 run"), "tool --password [oculto] run")
+
     def test_redact_no_oculta_de_mas(self):
         r = self.aw_mod.redact
-        for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated"):
+        for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated",
+                     "pass: 3 fail: 0", "tests passed=3", "bypass=1", "--password --verbose"):
             self.assertEqual(r(text), text)
 
     def test_clean_title(self):
@@ -1664,6 +1804,25 @@ class TestFunciones(AwCase):
         self.assertEqual(len(merged["hooks"]["Stop"]), 2)
         self.assertEqual(merged["hooks"]["Stop"][0], existing["hooks"]["Stop"][0])
         self.assertEqual(notes, ["hook Stop"])
+
+    def test_hook_signature_reconoce_variantes_y_no_toma_comandos_ajenos(self):
+        sig = self.aw_mod.hook_signature
+        for command in ('python3 "/a b/generate.py" hook stop', "python3 '/a b/generate.py' hook stop",
+                        "python3 /a/generate.py hook stop", 'bash -c "python3 /a/generate.py hook stop"',
+                        "sh -c 'aw hook stop'", "aw hook stop", "cd /x && aw hook stop"):
+            self.assertEqual(sig(command), "stop", command)
+        for command in ("otra-tool hook stop", "otra-aw hook stop", "python3 mi-generate.py hook stop",
+                        "aw hook inventado", "aw hook stop-all", None, 5):
+            self.assertIsNone(sig(command), command)
+
+    def test_merge_settings_no_duplica_un_hook_de_aw_escrito_de_otra_forma(self):
+        new = {"type": "command", "command": 'python3 "x/generate.py" hook stop', "timeout": 10}
+        template = {"hooks": {"Stop": [{"hooks": [new]}]}}
+        for command in ("python3 'x/generate.py' hook stop", 'bash -c "python3 x/generate.py hook stop"'):
+            existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": command}]}]}}
+            merged, notes = self.aw_mod.merge_settings(existing, template)
+            self.assertEqual(merged["hooks"]["Stop"], [{"hooks": [new]}], command)
+            self.assertEqual(notes, ["hook Stop actualizado"])
 
     def test_merge_settings_actualiza_en_su_sitio_los_hooks_de_aw(self):
         old = {"type": "command", "command": 'python3 "/viejo/generate.py" hook stop', "timeout": 5, "async": True}

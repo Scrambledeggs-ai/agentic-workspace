@@ -96,7 +96,7 @@ Cada proyecto creado con aw lleva su estado en archivos, y Claude Code los usa a
 * **Al abrir una sesión**, un hook (`SessionStart`) carga un resumen: estado, tareas en curso y últimas líneas del registro.
 * **Mientras se trabaja**, otros hooks anotan solos los commits, los fallos de herramientas (sin comandos completos ni secretos), las compactaciones y el resumen de cada sesión.
 * **Lo que exige criterio** se registra con comandos de formato fijo (`aw task`, `aw decide`, `aw log`).
-* **El estado** (`state.md`) se genera solo a partir de las tareas y el registro. Si contiene texto escrito a mano, no se sobrescribe.
+* **El estado** (`state.md`) se genera solo a partir de las tareas y el registro. El archivo generado lleva una línea de marca (`<!-- aw:auto — ... -->`): mientras esa línea esté, cualquier texto agregado a mano se pierde en la siguiente regeneración. Para llevar el estado a mano hay que quitar esa línea; desde entonces aw no lo sobrescribe.
 * **`core/` y `memory/`** se crean con un formato base para completar a mano (configuración, arranque, enrutamiento, política de memoria, memoria global). Los que solo remiten a otra fuente lo dicen en vez de duplicar contenido. `aw doctor` cuenta los campos `(completar)` que faltan.
 * **El índice de proyectos** del workspace (`memory/projects/project_index.md` y `memory/context_index.json`) lo regenera aw al sincronizar y al cerrar cada sesión: proyecto, estado y última actividad.
 
@@ -118,7 +118,7 @@ Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea d
 | `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes). Si un proyecto es un repo git y `sync` le añadió archivos de aw sin ignorar, lo avisa |
 | `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos, referencias a agentes, skills y herramientas, y, si el proyecto está en un repo git, qué archivos de aw no están ignorados (un `git add .` los incluiría) o ya están versionados, con las líneas para ignorarlos solo en local (`.git/info/exclude`) |
 
-Los comandos de tareas, decisiones y notas actúan sobre el proyecto de la carpeta actual (o el indicado con `--project`) y solo escriben dentro de él.
+Los comandos de tareas, decisiones y notas actúan sobre el proyecto de la carpeta actual (o el indicado con `--project`) y solo escriben dentro de él. Desde dentro de un proyecto, `--project` no permite escribir en otro: para eso hay que ejecutar el comando desde ese proyecto o desde fuera de un proyecto.
 
 ### Pruebas
 

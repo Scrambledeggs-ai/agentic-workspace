@@ -170,9 +170,14 @@ def as_list(value):
 
 # -- Plantillas --
 
+def sh_quote(path):
+    # Comillas dobles, como siempre, pero con \ " $ ` escapados para que el shell no los interprete.
+    return '"' + re.sub(r'([\\"$`])', r"\\\1", path) + '"'
+
+
 def machine_vars():
     script = os.path.abspath(__file__)
-    return {"ROOT": ROOT, "SCRIPT": script, "AW_CMD": f'python3 "{script}"'}
+    return {"ROOT": ROOT, "SCRIPT": script, "AW_CMD": f"python3 {sh_quote(script)}"}
 
 
 def project_vars(name, description=""):
@@ -427,12 +432,21 @@ def create_project(name, description=""):
     target = os.path.join(ROOT, "projects", name)
     if os.path.exists(target):
         raise AwError("Ya existe un proyecto con ese nombre.")
-    shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"))
-    render_tree(target, project_vars(name, description))
-    if not read_text(os.path.join(target, "project.md")).strip():
-        write_text(os.path.join(target, "project.md"), f"# {name}\n\n{description}\n")
-    log_event(target, "nota", "proyecto creado")
-    refresh_state(target)
+    variables = project_vars(name, description)
+    try:
+        shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"))
+        render_tree(target, variables)
+        # La plantilla del workspace puede venir de un aw anterior: los hooks y permisos se toman del repo.
+        settings_text = repo_settings_text()
+        if settings_text.strip():
+            sync_settings(target, settings_text, variables, dry_run=False, backup=False)
+        if not read_text(os.path.join(target, "project.md")).strip():
+            write_text(os.path.join(target, "project.md"), f"# {name}\n\n{description}\n")
+        log_event(target, "nota", "proyecto creado")
+        refresh_state(target)
+    except BaseException:  # no se deja un proyecto a medias: el nombre queda libre para reintentar
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     try:
         refresh_workspace_index()
     except (OSError, AwError):  # el índice es secundario: el proyecto ya está creado
@@ -536,12 +550,17 @@ def check_project_names(names):
             raise AwError(TEMPLATE_ERROR)
 
 
-def resolve_project(name=None):
+def resolve_project(name=None, write=False):
     if name:
         check_project_name(name)
         path = os.path.join(ROOT, "projects", name)
         if not os.path.isdir(path):
             raise AwError(f"No existe el proyecto '{name}'.")
+        # Los comandos de escritura están preaprobados en cada proyecto: desde uno no se escribe en otro.
+        current = find_project()
+        if write and current and os.path.realpath(current) != os.path.realpath(path):
+            raise AwError(f"Dentro del proyecto '{os.path.basename(current)}' no se escribe en '{name}': "
+                          "ejecuta el comando desde ese proyecto o desde fuera de un proyecto.")
     else:
         path = find_project()
         if not path:
@@ -596,7 +615,12 @@ def clean_title(title):
     return DATE_SUFFIX_RE.sub("", title).strip()
 
 
-SENSITIVE_KEY = r"[\w.-]{0,64}(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key)[\w.-]{0,64}"
+# "pass" solo cuenta unido a otra palabra por _ . o - (DB_PASS, pass_file): suelto aparece en salidas de pruebas.
+SENSITIVE_WORD = (r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key"
+                  r"|[_.-]pass(?![A-Za-z])|(?<![A-Za-z])pass[_.-])")
+SENSITIVE_KEY = r"[\w.-]{0,64}" + SENSITIVE_WORD + r"[\w.-]{0,64}"
+AUTH_SCHEME = r"(?:bearer|basic|token|digest|negotiate|api-?key)"
+REDACT_LIMIT = 2000  # caracteres que los hooks pasan a redact como máximo
 LONG_STRING_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])")
 
 
@@ -609,11 +633,15 @@ def mask_long_string(match):
 
 
 def redact(text):
-    text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:(?:bearer|basic)\s+)?\S+)", r"\1 [oculto]", text)
+    text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:" + AUTH_SCHEME + r"\s+)?\S+)",
+                  r"\1 [oculto]", text)
     text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [oculto]", text)
     text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
     text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
     text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)", r"\1 [oculto]", text)
+    # Opciones de línea de comandos con el valor separado por un espacio: --password x, --api-key x.
+    text = re.sub(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r"[\w-]*)\s+(?!\[oculto\]|-)(?:\"[^\"]*\"|'[^']*'|\S+)",
+                  r"\1 [oculto]", text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
     return LONG_STRING_RE.sub(mask_long_string, text)
 
@@ -1027,7 +1055,7 @@ def git_last_commit(cwd):
         result = subprocess.run(["git", "log", "-1", "--format=%h %s"], cwd=cwd, capture_output=True, text=True, timeout=5)
     except Exception:
         return None
-    return redact(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else None
+    return redact(result.stdout.strip()[:REDACT_LIMIT]) if result.returncode == 0 and result.stdout.strip() else None
 
 
 def hook_post_tool(payload, project):
@@ -1051,7 +1079,8 @@ def hook_tool_failure(payload, project):
     if re.fullmatch(r"Exit code \d+", first) and len(lines) > 1:
         first = f"{first} — {lines[1]}"  # Claude Code pone el código de salida en la primera línea
     # Solo herramienta y primera línea del error: nunca el comando completo.
-    append_text(pj(project, "execution", "errors.md"), f"- {now_str()} [{tool}] {redact(first)[:160]}\n")
+    # Se acota antes de redact: sus patrones son costosos con líneas muy largas y el hook tiene un tiempo límite.
+    append_text(pj(project, "execution", "errors.md"), f"- {now_str()} [{tool}] {redact(first[:REDACT_LIMIT])[:160]}\n")
     session_append(session_path(session_key(payload, project), "events"), "E\n")
 
 
@@ -1165,8 +1194,9 @@ def log_hook_error(event, exc):
 def run_hook(event):
     try:
         payload = read_payload()
-        cwd = payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-        project = find_project(cwd)
+        # Primero el proyecto donde se abrió la sesión: el cwd del evento cambia si se hace cd a otra carpeta.
+        session_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        project = (find_project(session_dir) if session_dir else None) or find_project(payload.get("cwd") or os.getcwd())
         handler = HOOK_HANDLERS.get(event)
         if project and handler and os.path.basename(project) != "template_project":
             handler(payload, project)
@@ -1180,10 +1210,15 @@ def run_hook(event):
 
 # -- Sincronización con la plantilla --
 
+HOOK_SIGNATURE_RE = re.compile(
+    r"""(?:(?:^|[\s"'/\\])generate\.py["']?|(?:^|[\s"';&|(])aw)\s+hook\s+([a-z-]+)(?=$|[\s"';&|)])""")
+
+
 def hook_signature(command):
-    # Solo reconoce los hooks de aw (generate.py o aw seguido de "hook <nombre>"); los demás devuelven None.
-    match = re.search(r'(?:generate\.py"?|\baw)\s+hook\s+([a-z-]+)(?:\s|$)', str(command or ""))
-    return match.group(1) if match else None
+    # Solo reconoce los hooks de aw: generate.py o aw como palabra completa, seguido de "hook <evento conocido>",
+    # con o sin comillas alrededor (también dentro de bash -c "..."). Los demás devuelven None.
+    match = HOOK_SIGNATURE_RE.search(str(command or ""))
+    return match.group(1) if match and match.group(1) in HOOK_EVENTS else None
 
 
 def hook_key(hook):
@@ -1251,7 +1286,7 @@ def merge_settings(existing, template):
     return merged, notes
 
 
-def sync_settings(project, source_text, variables, dry_run):
+def sync_settings(project, source_text, variables, dry_run, backup=True):
     dest = pj(project, ".claude", "settings.json")
     template = json.loads(render(source_text, variables, json_safe=True))
     if not os.path.exists(dest):
@@ -1268,7 +1303,8 @@ def sync_settings(project, source_text, variables, dry_run):
     if not notes:
         return []
     if not dry_run:
-        backup_file(dest)
+        if backup:
+            backup_file(dest)
         write_text(dest, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
     return [("actualizar", ".claude/settings.json: " + "; ".join(notes))]
 
@@ -1306,16 +1342,38 @@ def sync_project(project, template, dry_run=False):
     return changes
 
 
+@contextlib.contextmanager
+def preview_template():
+    # Copia temporal de la plantilla del workspace, completada como lo haría build(): así el modo prueba
+    # compara contra la misma plantilla que usará la sincronización real, sin tocar el workspace.
+    tmp = tempfile.mkdtemp(prefix="aw-plantilla-")
+    try:
+        preview = os.path.join(tmp, "template_project")
+        source = os.path.join(ROOT, "projects", "template_project")
+        if os.path.isdir(source):
+            shutil.copytree(source, preview)
+        node = as_dict(as_dict(load_structure().get("projects")).get("folders")).get("template_project")
+        build(preview, node, os.path.join("projects", "template_project"))
+        yield preview
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def sync_projects(names=None, dry_run=False, workspace=False):
     check_project_names(names)
-    template = os.path.join(ROOT, "projects", "template_project")
-    if not dry_run:
-        build(ROOT, load_structure())
+    if dry_run:
+        with preview_template() as template:
+            return sync_from_template(template, names, True, workspace)
+    build(ROOT, load_structure())
+    return sync_from_template(os.path.join(ROOT, "projects", "template_project"), names, False, workspace)
+
+
+def sync_from_template(template, names, dry_run, workspace):
     if not os.path.isdir(template):
         raise AwError("No existe template_project. Ejecuta primero 'aw init'.")
     projects = names or list_projects()
     if dry_run:
-        print("Modo prueba: no se cambia nada. La plantilla del workspace tampoco se actualiza (usa 'aw init' para eso).")
+        print("Modo prueba: no se cambia nada. Se muestra lo que haría 'aw sync'.")
     total = 0
     action, detail = ensure_workspace_claude_md(dry_run=dry_run, force=workspace)
     if action in ("crear", "marcar", "actualizar"):
@@ -1527,8 +1585,8 @@ def doctor_project(project):
             absent = [e for e in HOOK_EVENTS if e not in present]
             add("bad" if absent else "ok", ("faltan hooks: " + ", ".join(absent)) if absent else "hooks de aw instalados")
             for command in commands:
-                match = re.search(r'"([^"]*generate\.py)"', command)
-                if match and not os.path.exists(match.group(1)):
+                match = re.search(r'"((?:[^"\\]|\\.)*generate\.py)"', command)
+                if match and not os.path.exists(re.sub(r"\\(.)", r"\1", match.group(1))):
                     add("bad", f"un hook apunta a un script que no existe: {match.group(1)}")
                     break
             allow = as_list(as_dict(settings.get("permissions")).get("allow"))
@@ -1627,8 +1685,8 @@ def action_install_command():
     os.makedirs(bin_dir, exist_ok=True)
     wrapper_path = os.path.join(bin_dir, WRAPPER_NAME)
     script_path = os.path.abspath(__file__)
-    with open(wrapper_path, "w") as f:
-        f.write(f'#!/bin/sh\nexec python3 "{script_path}" "$@"\n')
+    # write_text reemplaza el archivo: si en ese lugar hay un enlace simbólico, no escribe a través de él.
+    write_text(wrapper_path, f'#!/bin/sh\nexec python3 {sh_quote(script_path)} "$@"\n')
     st = os.stat(wrapper_path)
     os.chmod(wrapper_path, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     print(f"Comando '{WRAPPER_NAME}' instalado en {wrapper_path}")
@@ -1765,7 +1823,7 @@ def dispatch(args):
     elif args.cmd == "task":
         if not args.tcmd:  # sin subcomando, args no trae --project
             raise AwError("Uso: aw task add|start|done|list")
-        project = resolve_project(args.project)
+        project = resolve_project(args.project, write=args.tcmd != "list")
         if args.tcmd == "add":
             task_id, prio = task_add(project, " ".join(args.title), args.prio)
             print(f"{task_id} creada [{prio}]")
@@ -1780,11 +1838,11 @@ def dispatch(args):
         else:
             raise AwError("Uso: aw task add|start|done|list")
     elif args.cmd == "decide":
-        project = resolve_project(args.project)
+        project = resolve_project(args.project, write=True)
         decide(project, " ".join(args.title), args.why, args.alt)
         print("Decisión registrada.")
     elif args.cmd == "log":
-        project = resolve_project(args.project)
+        project = resolve_project(args.project, write=True)
         log_event(project, "nota", " ".join(args.text))
         refresh_state(project)
         print("Nota registrada.")
