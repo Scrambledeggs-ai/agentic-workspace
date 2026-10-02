@@ -293,11 +293,13 @@ def ensure_workspace_claude_md(dry_run=False, force=False):
     return "difiere", ""
 
 
-def build(path, node, rel=""):
+def build(path, node, rel="", collect=None):
+    # Con collect (un dict) no escribe nada: anota {ruta relativa: contenido} de lo que crearía o rellenaría.
     if not isinstance(node, dict):
         return
 
-    os.makedirs(path, exist_ok=True)
+    if collect is None:
+        os.makedirs(path, exist_ok=True)
     variables = machine_vars()
 
     for filename in node.get("files", []):
@@ -309,28 +311,25 @@ def build(path, node, rel=""):
         if not exists and os.path.islink(filepath):
             continue  # enlace simbólico roto: no se escribe a través de él
         content = workspace_claude_md() if relpath == "CLAUDE.md" else template_content(relpath, variables)
-        if not exists:
-            if content is None and relpath in DEFAULT_HEADERS:
-                name, desc = DEFAULT_HEADERS[relpath]
-                content = make_header(name, desc)
+        if not exists and content is None and relpath in DEFAULT_HEADERS:
+            name, desc = DEFAULT_HEADERS[relpath]
+            content = make_header(name, desc)
+        if collect is not None:
+            if content:
+                collect[relpath] = content
+        elif not exists or content is not None:  # un archivo existente pero vacío se rellena con su plantilla
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content or "")
-        elif content is not None:
-            # Archivo existente pero vacío: se rellena con su plantilla.
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(content)
 
-    for folder_name, folder_content in node.get("folders", {}).items():
-        folder_path = os.path.join(path, folder_name)
-        os.makedirs(folder_path, exist_ok=True)
-        build(folder_path, folder_content, os.path.join(rel, folder_name))
-
-    for key, value in node.items():
-        if key in ["files", "folders"]:
-            continue
-        subdir = os.path.join(path, key)
-        os.makedirs(subdir, exist_ok=True)
-        build(subdir, value, os.path.join(rel, key))
+    children = dict(node.get("folders", {}))
+    children.update({key: value for key, value in node.items() if key not in ("files", "folders")})
+    for name, child in children.items():
+        child_path = os.path.join(path, name)
+        if os.path.islink(child_path) and (collect is not None or not os.path.exists(child_path)):
+            continue  # enlace roto, o (al anotar) enlace a otra carpeta: la sincronización no lo recorre
+        if collect is None:
+            os.makedirs(child_path, exist_ok=True)
+        build(child_path, child, os.path.join(rel, name), collect)
 
 
 def load_structure():
@@ -455,7 +454,7 @@ def ignore_template_extras(dirpath, names):
 def create_project(name, description=""):
     name = (name or "").strip()
     check_project_name(name)
-    if name in NOT_PROJECTS:
+    if name == "template_project":
         raise AwError("Nombre de proyecto inválido.")
     template = os.path.join(ROOT, "projects", "template_project")
     if not os.path.isdir(template):
@@ -651,11 +650,11 @@ def clean_title(title):
     return DATE_SUFFIX_RE.sub("", title).strip()
 
 
-SENSITIVE_WORD = r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key)"
+# "pass" solo cuenta unido a otra palabra por _ . o - (DB_PASS, pass_file): suelto aparece en salidas de pruebas.
+# Ante la duda se oculta de más: un nombre de archivo con una de estas palabras seguido de ":" también se tapa.
+SENSITIVE_WORD = (r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key"
+                  r"|[_.-]pass(?![A-Za-z])|(?<![A-Za-z])pass[_.-])")
 SENSITIVE_KEY = r"[\w.-]{0,64}" + SENSITIVE_WORD + r"[\w.-]{0,64}"
-# "pass" solo cuenta unido a otra palabra por _ . o - (DB_PASS, pass_file) y con "=": suelto, o seguido de ":",
-# aparece en salidas de pruebas y en referencias archivo:línea (test_pass.py:12:).
-PASS_KEY = r"[\w.-]{0,64}(?:[_.-]pass(?![A-Za-z])|(?<![A-Za-z])pass[_.-])[\w.-]{0,64}"
 AUTH_SCHEME = r"(?:bearer|basic|token|digest|negotiate|api-?key)"
 REDACT_LIMIT = 2000  # caracteres que los hooks pasan a redact como máximo
 SECRET_VALUE = r"(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)"
@@ -684,7 +683,6 @@ def redact(text):
     text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
     text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
     text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*" + SECRET_VALUE, r"\1 [oculto]", text)
-    text = re.sub(r"(?i)\b(" + PASS_KEY + r")[\"']?\s*=\s*" + SECRET_VALUE, r"\1 [oculto]", text)
     # Opciones de línea de comandos con el valor separado por un espacio.
     text = OPTION_RE.sub(mask_option, text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
@@ -1111,12 +1109,6 @@ def git_last_commit(cwd):
     return redact(result.stdout.strip()[:REDACT_LIMIT]) if result.returncode == 0 and result.stdout.strip() else None
 
 
-def commit_already_logged(project, detail):
-    commit_hash = detail.split()[0]
-    recent = [entry for entry in log_entries(project) if "[commit]" in entry][-20:]
-    return any(entry.split("[commit]", 1)[1].split()[:1] == [commit_hash] for entry in recent)
-
-
 def hook_post_tool(payload, project):
     tool = str(payload.get("tool_name") or "?")
     events = session_path(session_key(payload, project), "events")
@@ -1124,10 +1116,7 @@ def hook_post_tool(payload, project):
     if tool == "Bash":
         command = str((payload.get("tool_input") or {}).get("command") or "")
         if is_git_commit(command):
-            detail = git_last_commit(payload.get("cwd") or project)
-            if detail and commit_already_logged(project, detail):
-                return  # HEAD no cambió: el comando parecía un commit pero no creó ninguno
-            log_event(project, "commit", detail or "(sin detalle)")
+            log_event(project, "commit", git_last_commit(payload.get("cwd") or project) or "(sin detalle)")
             session_append(events, "C\n")
 
 
@@ -1390,33 +1379,10 @@ def sync_settings(project, source_text, variables, dry_run, backup=True):
 def template_overlay(template):
     # Lo que build() crearía o rellenaría en la plantilla del workspace, como {ruta relativa: texto}, sin
     # escribirlo: así el modo prueba compara contra la misma plantilla que usará la sincronización real.
-    overlay = {}
-    variables = machine_vars()
-
-    def visit(node, rel):
-        if not isinstance(node, dict):
-            return
-        path = os.path.join(template, *rel.split("/")) if rel else template
-        if os.path.islink(path):
-            return  # la sincronización no recorre los enlaces a carpetas
-        for filename in node.get("files", []):
-            filepath = os.path.join(path, filename)
-            try:
-                if os.path.lexists(filepath) and (not os.path.exists(filepath) or os.path.getsize(filepath) > 0):
-                    continue  # ya tiene contenido, o es un enlace roto que build() no toca
-            except OSError:
-                continue
-            file_rel = f"{rel}/{filename}" if rel else filename
-            content = template_content("projects/template_project/" + file_rel, variables)
-            if content:
-                overlay[file_rel] = content
-        children = dict(as_dict(node.get("folders")))
-        children.update({key: value for key, value in node.items() if key not in ("files", "folders")})
-        for name, child in children.items():
-            visit(child, f"{rel}/{name}" if rel else name)
-
-    visit(as_dict(as_dict(load_structure().get("projects")).get("folders")).get("template_project"), "")
-    return overlay
+    prefix = "projects/template_project"
+    collected = {}
+    build(template, as_dict(as_dict(load_structure().get("projects")).get("folders")).get("template_project"), prefix, collected)
+    return {rel[len(prefix) + 1:]: text for rel, text in collected.items()}
 
 
 def walk_order(rel):
@@ -1432,8 +1398,12 @@ def template_sources(template, overlay=None):
             if ".bak-" in fname:
                 continue
             source = os.path.join(dirpath, fname)
+            rel = os.path.relpath(source, template).replace(os.sep, "/")
+            if rel == ".claude/settings.json" and repo_settings_text().strip():
+                sources[rel] = ""  # se usa el del repo: el de la plantilla no hace falta leerlo
+                continue
             try:
-                sources[os.path.relpath(source, template).replace(os.sep, "/")] = read_text(source)
+                sources[rel] = read_text(source)
             except OSError:
                 continue  # enlace en bucle o archivo sin permiso de lectura: no se usa
     sources.update(overlay or {})
@@ -1477,7 +1447,8 @@ def sync_projects(names=None, dry_run=False, workspace=False):
 def sync_from_template(template, names, dry_run, workspace):
     if not dry_run and not os.path.isdir(template):
         raise AwError("No existe template_project. Ejecuta primero 'aw init'.")
-    sources = template_sources(template, template_overlay(template) if dry_run else None)
+    overlay = template_overlay(template) if dry_run else {}
+    sources = template_sources(template, overlay)
     projects = names or list_projects()
     if dry_run:
         print("Modo prueba: no se cambia nada. Se muestra lo que haría 'aw sync'.")
@@ -1493,7 +1464,8 @@ def sync_from_template(template, names, dry_run, workspace):
         print("- workspace: el CLAUDE.md de la raíz no es el del workspace aw (sin huella y con otra primera línea): "
               "no se gestiona, tampoco con --workspace. Si es una versión antigua del workspace, renómbralo y ejecuta 'aw init'.")
     settings_text = repo_settings_text()
-    if settings_text.strip():
+    # En modo prueba, si build() crearía el settings de la plantilla, no hay nada que fusionar todavía.
+    if settings_text.strip() and ".claude/settings.json" not in overlay:
         for change, rel in sync_settings(template, settings_text, project_vars("template_project", ""), dry_run):
             total += 1
             print(f"- plantilla: {change}: {rel}")
