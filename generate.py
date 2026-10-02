@@ -432,12 +432,21 @@ def create_project(name, description=""):
     target = os.path.join(ROOT, "projects", name)
     if os.path.exists(target):
         raise AwError("Ya existe un proyecto con ese nombre.")
-    shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"))
-    render_tree(target, project_vars(name, description))
-    if not read_text(os.path.join(target, "project.md")).strip():
-        write_text(os.path.join(target, "project.md"), f"# {name}\n\n{description}\n")
-    log_event(target, "nota", "proyecto creado")
-    refresh_state(target)
+    variables = project_vars(name, description)
+    try:
+        shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"))
+        render_tree(target, variables)
+        # La plantilla del workspace puede venir de un aw anterior: los hooks y permisos se toman del repo.
+        settings_text = repo_settings_text()
+        if settings_text.strip():
+            sync_settings(target, settings_text, variables, dry_run=False, backup=False)
+        if not read_text(os.path.join(target, "project.md")).strip():
+            write_text(os.path.join(target, "project.md"), f"# {name}\n\n{description}\n")
+        log_event(target, "nota", "proyecto creado")
+        refresh_state(target)
+    except BaseException:  # no se deja un proyecto a medias: el nombre queda libre para reintentar
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     try:
         refresh_workspace_index()
     except (OSError, AwError):  # el índice es secundario: el proyecto ya está creado
@@ -1277,7 +1286,7 @@ def merge_settings(existing, template):
     return merged, notes
 
 
-def sync_settings(project, source_text, variables, dry_run):
+def sync_settings(project, source_text, variables, dry_run, backup=True):
     dest = pj(project, ".claude", "settings.json")
     template = json.loads(render(source_text, variables, json_safe=True))
     if not os.path.exists(dest):
@@ -1294,7 +1303,8 @@ def sync_settings(project, source_text, variables, dry_run):
     if not notes:
         return []
     if not dry_run:
-        backup_file(dest)
+        if backup:
+            backup_file(dest)
         write_text(dest, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
     return [("actualizar", ".claude/settings.json: " + "; ".join(notes))]
 

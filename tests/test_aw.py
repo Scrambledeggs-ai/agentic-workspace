@@ -1459,6 +1459,23 @@ class TestSettingsDesdeLaPlantilla(AwCase):
         self.assertNotIn("✕", out)
 
 
+    def test_un_proyecto_nuevo_recibe_los_hooks_y_permisos_actuales_aunque_la_plantilla_este_atrasada(self):
+        self.init()
+        template = os.path.join(self.ws, "projects", "template_project", ".claude", "settings.json")
+        self.strip_new_dirs(template)
+        settings = json.loads(slurp(template))
+        del settings["hooks"]["Stop"]
+        settings["permissions"]["allow"] = []
+        self.write(template, json.dumps(settings))
+        self.aw("project", "new", "nuevo")
+        claude_dir = os.path.join(self.project("nuevo"), ".claude")
+        self.assertEqual(len(self.dirs(os.path.join(claude_dir, "settings.json"))), 5)
+        self.assertEqual([f for f in os.listdir(claude_dir) if ".bak-" in f], [])
+        out = self.aw("doctor", "nuevo").stdout
+        self.assertIn("✓ hooks de aw instalados", out)
+        self.assertIn("✓ permisos de aw presentes", out)
+
+
 class Corte(Exception):
     """Simula que el proceso se corta a mitad de una operación."""
 
@@ -1576,6 +1593,20 @@ class TestBloqueoYAtomicidad(AwCase):
         self.assertTrue(os.path.isdir(target))
         holder.stdin.close()
         holder.wait(timeout=10)
+
+    def test_create_project_no_deja_una_carpeta_a_medias_si_falla(self):
+        self.init()
+        original = self.aw_mod.render_tree
+
+        def cut(*_args):
+            raise Corte()
+
+        self.aw_mod.render_tree = cut
+        with self.assertRaises(Corte):
+            self.aw_mod.create_project("uno")
+        self.assertFalse(os.path.exists(self.project("uno")))
+        self.aw_mod.render_tree = original
+        self.assertTrue(os.path.isdir(self.aw_mod.create_project("uno")))  # el nombre queda libre para reintentar
 
     def test_project_lock_es_reentrante(self):
         project = self.new_project()
