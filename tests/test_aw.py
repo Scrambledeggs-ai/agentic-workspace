@@ -891,6 +891,20 @@ class TestSync(AwCase):
         self.assertFalse(os.path.exists(os.path.join(self.ws, "core")), "build() no debe correr con nombres inválidos")
         self.assertEqual(sorted(os.listdir(self.tmp)), before)
 
+    def test_sync_y_doctor_ignoran_carpetas_que_no_son_proyectos(self):
+        self.new_project()
+        extras = (".venv", ".git", "node_modules", "__pycache__")
+        for name in extras:
+            self.write(os.path.join(self.project(name), "paquete", "index.js"), "x")
+        aw = load_aw(self.ws)
+        self.assertEqual(aw.list_projects(), ["demo"])
+        out = self.aw("sync").stdout + self.aw("doctor").stdout
+        for name in extras:
+            self.assertNotIn(name, out)
+            self.assertEqual(os.listdir(self.project(name)), ["paquete"], name)
+        index = json.loads(slurp(os.path.join(self.ws, "memory", "context_index.json")))
+        self.assertEqual(list(index["proyectos"]), ["demo"])
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")

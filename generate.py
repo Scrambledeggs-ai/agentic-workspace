@@ -368,13 +368,17 @@ def registry_menu(label, folder):
 
 # -- Proyectos --
 
+# Carpetas de projects/ que nunca son un proyecto: la plantilla y las que dejan las herramientas de desarrollo.
+NOT_PROJECTS = {"template_project", "node_modules", "__pycache__"}
+
+
 def list_projects():
     projects_dir = os.path.join(ROOT, "projects")
     if not os.path.isdir(projects_dir):
         return []
     return sorted(
         p for p in os.listdir(projects_dir)
-        if p != "template_project" and os.path.isdir(os.path.join(projects_dir, p))
+        if p not in NOT_PROJECTS and not p.startswith(".") and os.path.isdir(os.path.join(projects_dir, p))
     )
 
 
