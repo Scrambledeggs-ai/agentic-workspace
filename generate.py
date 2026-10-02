@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -1464,7 +1465,7 @@ def migration_facts(project):
             "inicio": min(first_commit or oldest_date or today(), today())}
 
 
-def migration_text(name, project, facts, created, kept, merged_settings):
+def migration_text(name, project, facts, created, kept, merged_settings, origin=None):
     own = (f"{facts['propios']} (el más antiguo, del {facts['antiguo']})" if facts["propios"]
            else "ninguno (la carpeta estaba vacía)")
     deps = "sí (" + ", ".join(facts["dependencias"]) + ")" if facts["dependencias"] else "no"
@@ -1476,6 +1477,7 @@ def migration_text(name, project, facts, created, kept, merged_settings):
         "",
         "## Estado inicial",
         f"- Carpeta: `{os.path.relpath(project, ROOT).replace(os.sep, '/')}`",
+        *([f"- Origen: `{origin}` (importada con `aw project import`)"] if origin else []),
         f"- Archivos propios: {own}",
         f"- Repositorio git: {facts['git']}",
         f"- Dependencias instaladas (node_modules, venv): {deps}",
@@ -1520,7 +1522,7 @@ def is_untouched_by_aw(project):
                    for rel in ("state.md", "tasks/backlog.md", "execution/run_log.md"))
 
 
-def sync_project(project, sources, dry_run=False):
+def sync_project(project, sources, dry_run=False, origin=None):
     name = os.path.basename(project)
     variables = project_vars(name, "")
     migrating = is_untouched_by_aw(project)
@@ -1548,7 +1550,7 @@ def sync_project(project, sources, dry_run=False):
         facts = migration_facts(project)
         variables["DATE"] = facts["inicio"]
         if write_ficha:
-            write_text(ficha, migration_text(name, project, facts, created, kept, merged_settings))
+            write_text(ficha, migration_text(name, project, facts, created, kept, merged_settings, origin))
     changes = []
     for action, rel in plan:
         if rel == ".claude/settings.json":
@@ -1574,14 +1576,14 @@ def sync_project(project, sources, dry_run=False):
     return changes
 
 
-def sync_projects(names=None, dry_run=False, workspace=False):
+def sync_projects(names=None, dry_run=False, workspace=False, origin=None):
     check_project_names(names)
     if not dry_run:
         build(ROOT, load_structure())
-    return sync_from_template(os.path.join(ROOT, "projects", "template_project"), names, dry_run, workspace)
+    return sync_from_template(os.path.join(ROOT, "projects", "template_project"), names, dry_run, workspace, origin)
 
 
-def sync_from_template(template, names, dry_run, workspace):
+def sync_from_template(template, names, dry_run, workspace, origin=None):
     if not dry_run and not os.path.isdir(template):
         raise AwError("No existe template_project. Ejecuta primero 'aw init'.")
     overlay = template_overlay(template) if dry_run else {}
@@ -1611,7 +1613,7 @@ def sync_from_template(template, names, dry_run, workspace):
         if not os.path.isdir(path):
             print(f"- {name}: no existe, se omite.")
             continue
-        changes = sync_project(path, sources, dry_run)
+        changes = sync_project(path, sources, dry_run, origin)
         total += len(changes)
         print(f"- {name}: " + (f"{len(changes)} cambio(s)" if changes else "al día"))
         for change, rel in changes:
@@ -1624,6 +1626,227 @@ def sync_from_template(template, names, dry_run, workspace):
         refresh_workspace_index()
         print("- workspace: índice de proyectos al día")
     print(f"Total: {total} cambio(s)" + (" (no aplicados)" if dry_run else "") + ".")
+
+
+# -- Importar una carpeta y deshacer la sincronización --
+
+def short_path(path):
+    # Con ~ en lugar de la carpeta personal: la ruta queda escrita en archivos del proyecto.
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if home != "~" and (path + os.sep).startswith(home + os.sep) else path
+
+
+def confirm_name(name, yes):
+    # Lo que mueve o borra pide escribir el nombre del proyecto; sin esa respuesta no se hace nada.
+    if yes:
+        return True
+    try:
+        return input(f"Escribe el nombre del proyecto ({name}) para confirmar: ").strip() == name
+    except EOFError:
+        return False
+
+
+def import_project(source, name=None, dry_run=False, yes=False):
+    given = os.path.abspath(os.path.expanduser(source or ""))
+    if os.path.islink(given):
+        raise AwError("La ruta es un enlace simbólico: indica la carpeta real.")
+    if not os.path.isdir(given):
+        raise AwError(f"No existe la carpeta: {given}")
+    src, root = os.path.realpath(given), os.path.realpath(ROOT)
+    if (src + os.sep).startswith(os.path.join(root, "projects") + os.sep):
+        raise AwError("La carpeta ya está en projects/: usa 'aw sync NOMBRE' para sincronizarla.")
+    if (root + os.sep).startswith(src + os.sep):
+        raise AwError("La carpeta es el workspace o lo contiene: no se puede importar.")
+    name = (name or os.path.basename(src)).strip()
+    check_project_names([name])
+    target = os.path.join(ROOT, "projects", name)
+    if os.path.lexists(target):
+        raise AwError(f"Ya existe projects/{name}: elige otro nombre con --name.")
+    if not os.path.isdir(os.path.join(ROOT, "projects", "template_project")):
+        raise AwError("No existe template_project. Ejecuta primero 'aw init'.")
+    origin = short_path(src)
+    facts = migration_facts(src)
+    notes = []
+    if facts["git"].endswith("repositorio superior"):
+        notes.append("está dentro de un repositorio git superior: allí sus archivos quedarán como borrados")
+    venvs = [d for d in facts["dependencias"] if "venv" in d]
+    if venvs:
+        notes.append(f"{', '.join(venvs)} lleva rutas absolutas y deja de funcionar al mover la carpeta: hay que crearlo de nuevo")
+    if not is_untouched_by_aw(src):
+        notes.append("ya tiene archivos de aw: se mueve y se sincroniza, sin ficha de migración")
+    notes.append("la memoria y las sesiones de Claude Code de la ruta anterior no acompañan a la carpeta")
+    print(f"Importar: {origin} -> projects/{name}")
+    for note in notes:
+        print(f"  aviso: {note}")
+    if dry_run:
+        print("Modo prueba: no se movió nada.")
+        return 0
+    if not confirm_name(name, yes):
+        print("Cancelado: no se movió nada.")
+        return 1
+    try:
+        os.rename(src, target)  # atómico; entre discos distintos falla en vez de copiar a medias
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise AwError("La carpeta está en otro disco: muévela a mano a projects/ y ejecuta "
+                          f"'aw sync {name}'.") from None
+        raise AwError(f"No se pudo mover la carpeta: {exc.strerror or exc}") from None
+    try:
+        sync_projects([name], origin=origin)
+        log_event(target, "nota", f"proyecto importado desde {origin}")
+        refresh_state(target)
+    except (AwError, OSError) as exc:
+        raise AwError(f"La carpeta ya se movió a projects/{name}, pero la sincronización falló ({exc}). "
+                      f"Repite 'aw sync {name}'.") from None
+    print()
+    doctor([name])
+    return 0
+
+
+MIGRATION_NOTES_PLACEHOLDER = "(incidencias de la migración y lo aprendido; lo completa quien migra)"
+LOG_ARCHIVE = "execution/run_log_archivo.md"
+# Archivos que solo escriben los hooks o aw sync: no llevan contenido del usuario.
+AW_GENERATED = ("context_index.json", "execution/errors.md", "tools/tool_usage.md", "tools/tool_state.json")
+# Entradas del registro que aw escribe solo; las de `aw log`, `aw decide` y las tareas son del usuario.
+AUTO_LOG_RE = re.compile(r"- \d{4}-\d{2}-\d{2} \d{2}:\d{2} "
+                         r"(?:\[(?:sesión|commit|compactación)\] |\[nota\] proyecto (?:migrado a aw|importado desde))")
+
+
+def neutral(text):
+    # Para comparar con la plantilla: sin el contenido de los bloques aw:auto ni las fechas, que aw escribe solo.
+    text = re.sub(re.escape(AUTO_START) + r".*?" + re.escape(AUTO_END), AUTO_START + AUTO_END, text, flags=re.S)
+    return re.sub(r"\d{4}-\d{2}-\d{2}", "FECHA", text).strip()
+
+
+def without_auto_entries(text):
+    return "\n".join(line for line in text.splitlines() if not AUTO_LOG_RE.match(line))
+
+
+def unsync_status(project, rel, sources, variables):
+    # None si el archivo ya no existe; "" si sigue como lo dejó aw; si no, el motivo por el que no se borra.
+    path = pj(project, *rel.split("/"))
+    if not os.path.lexists(path):
+        return None
+    inside = (os.path.realpath(path) + os.sep).startswith(os.path.realpath(project) + os.sep)
+    if os.path.islink(path) or not os.path.isfile(path) or not inside:
+        return "ya no es un archivo normal del proyecto"
+    if rel in AW_GENERATED:
+        return ""
+    try:
+        text = read_text(path)
+    except AwError:
+        return "no está en UTF-8"
+    if rel == "state.md":
+        return "" if state_is_auto(text) else "tiene texto manual"
+    if rel == LOG_ARCHIVE:
+        entries = [line for line in without_auto_entries(text).splitlines() if line.startswith("- ")]
+        return "tiene notas o decisiones registradas" if entries else ""
+    if rel == ".claude/settings.json":
+        try:
+            same = json.loads(text) == json.loads(render(repo_settings_text() or sources.get(rel, ""), variables, json_safe=True))
+        except ValueError:
+            same = False
+        return "" if same else "difiere de lo que instala aw"
+    if not sources.get(rel, "").strip():
+        return "la plantilla actual no lo tiene: no se puede comparar"
+    reason = "tiene contenido propio o es de una plantilla anterior"
+    if rel == "execution/run_log.md":
+        text, reason = without_auto_entries(text), "tiene notas o decisiones registradas"
+    expected = render(sources[rel], variables, json_safe=rel.lower().endswith(".json"))
+    return "" if neutral(text) == neutral(expected) else reason
+
+
+def unsync_plan(project, created):
+    sources = template_sources(os.path.join(ROOT, "projects", "template_project"))
+    variables = project_vars(os.path.basename(project), "")
+    listed = list(created)
+    if "execution/run_log.md" in listed and LOG_ARCHIVE not in listed:
+        listed.append(LOG_ARCHIVE)  # lo crea la rotación del registro, después de la migración
+    delete, gone, changed = [], [], []
+    for rel in listed:
+        status = unsync_status(project, rel, sources, variables)
+        if status is None:
+            if rel != LOG_ARCHIVE:
+                gone.append(rel)
+        elif status:
+            changed.append((rel, status))
+        else:
+            delete.append(rel)
+    return delete, gone, changed
+
+
+def unsync_project(name, dry_run=False, yes=False):
+    check_project_names([name])
+    project = resolve_project(name, write=True)
+    created = migration_created(project)
+    if not created:
+        raise AwError(f"'{name}' no tiene {MIGRATION_FILE} con la lista de archivos creados por aw: "
+                      "sin esa lista no se sabe qué existía antes y no se borra nada.")
+    plan = unsync_plan(project, created)
+    delete, gone, changed = plan
+    print(f"Deshacer la sincronización de '{name}' (según {MIGRATION_FILE}):")
+    for rel in delete:
+        print(f"  borrar: {rel}")
+    for rel in gone:
+        print(f"  ya no existe: {rel}")
+    for rel, reason in changed:
+        print(f"  con cambios: {rel} ({reason})")
+    if changed:
+        print(f"{len(changed)} archivo(s) creados por aw tienen cambios: no se borra nada. Revísalos; "
+              "si ya no los necesitas, bórralos a mano y repite el comando.")
+        return 1
+    if dry_run:
+        print("Modo prueba: no se borró nada.")
+        return 0
+    if not confirm_name(name, yes):
+        print("Cancelado: no se borró nada.")
+        return 1
+    ficha = pj(project, MIGRATION_FILE)
+    with project_lock(project):
+        if unsync_plan(project, created) != plan:
+            raise AwError("El proyecto cambió mientras se esperaba la confirmación: no se borró nada. Repite el comando.")
+        ficha_text = read_text(ficha)
+        exposure = git_exposure(project, delete)
+        for rel in delete:
+            os.remove(pj(project, *rel.split("/")))
+        # Las carpetas que quedaron vacías; rmdir no borra una carpeta con contenido.
+        folders = {"/".join(rel.split("/")[:i]) for rel in delete + gone for i in range(1, len(rel.split("/")))}
+        for folder in sorted(folders, key=lambda f: -f.count("/")):
+            try:
+                os.rmdir(pj(project, *folder.split("/")))
+            except OSError:
+                pass
+        keep_ficha = MIGRATION_NOTES_PLACEHOLDER not in ficha_text
+        if not keep_ficha:
+            os.remove(ficha)
+    print(f"{len(delete)} archivo(s) borrados. Lo que existía antes de la migración no se tocó.")
+    if keep_ficha:
+        print(f"- {MIGRATION_FILE} se conserva: tiene notas propias.")
+    settings = pj(project, ".claude", "settings.json")
+    if ".claude/settings.json" not in created and " hook " in read_text(settings):
+        backups = sorted(n for n in os.listdir(os.path.dirname(settings)) if n.startswith("settings.json.bak-"))
+        print("- .claude/settings.json ya existía y no se toca: conserva los hooks y permisos de aw. Para volver al "
+              "original, restaura a mano el respaldo: "
+              + (", ".join(f".claude/{n}" for n in backups) if backups else "(no hay respaldo al lado)") + ".")
+    if exposure:
+        if exposure["versionados"]:
+            print(f"- aviso: {len(exposure['versionados'])} archivo(s) borrados estaban versionados en git "
+                  f"({', '.join(exposure['versionados'])}): `git status` los muestra como borrados y "
+                  "`git checkout -- <archivo>` los recupera.")
+        print(f"- Si agregaste a {exposure['exclude']} las líneas que da `aw doctor`, ya puedes quitarlas.")
+    try:
+        refresh_workspace_index()
+    except (OSError, AwError):  # el índice es secundario: lo borrado ya está borrado
+        pass
+    origin = re.search(r"^- Origen: `(.+?)`", ficha_text, re.M)
+    hint = "."
+    if origin:
+        back = os.path.expanduser(origin.group(1))
+        hint = (f": mv {sh_quote(project)} {sh_quote(back)}" if not os.path.lexists(back)
+                else f" (su ubicación anterior, {origin.group(1)}, está ocupada).")
+    print(f"- La carpeta sigue en projects/: el próximo `aw sync` sin nombres la volvería a convertir en proyecto aw. "
+          f"Para evitarlo, sácala de projects/{hint}")
+    return 0
 
 
 # -- Diagnóstico --
@@ -2053,6 +2276,11 @@ def build_parser():
     new = project_sub.add_parser("new", help="crea un proyecto desde la plantilla")
     new.add_argument("name")
     new.add_argument("--desc", default="")
+    imp = project_sub.add_parser("import", help="mueve una carpeta a projects/, la sincroniza y la diagnostica")
+    imp.add_argument("path")
+    imp.add_argument("--name", default=None, help="nombre del proyecto (por defecto, el de la carpeta)")
+    imp.add_argument("--dry-run", action="store_true", help="muestra lo que haría sin mover nada")
+    imp.add_argument("--yes", action="store_true", help="no pide confirmación")
 
     task = sub.add_parser("task", help="tareas del proyecto")
     task_sub = task.add_subparsers(dest="tcmd")
@@ -2083,6 +2311,11 @@ def build_parser():
     sync.add_argument("--workspace", action="store_true",
                       help="actualiza el CLAUDE.md del workspace con la plantilla aunque tenga cambios propios (se respalda antes)")
 
+    unsync = sub.add_parser("unsync", help="deshace la sincronización: borra lo que creó aw si sigue sin cambios")
+    unsync.add_argument("name")
+    unsync.add_argument("--dry-run", action="store_true", help="muestra lo que haría sin borrar nada")
+    unsync.add_argument("--yes", action="store_true", help="no pide confirmación")
+
     doc = sub.add_parser("doctor", help="diagnóstico de proyectos")
     doc.add_argument("names", nargs="*")
     return parser
@@ -2105,8 +2338,10 @@ def dispatch(args):
     if args.cmd == "init":
         action_init()
     elif args.cmd == "project":
+        if args.pcmd == "import":
+            return import_project(args.path, args.name, args.dry_run, args.yes)
         if args.pcmd != "new":
-            raise AwError("Uso: aw project new NOMBRE [--desc TEXTO]")
+            raise AwError("Uso: aw project new NOMBRE [--desc TEXTO] | aw project import RUTA [--name NOMBRE]")
         target = create_project(args.name, args.desc)
         print(f"Proyecto creado: {target}")
     elif args.cmd == "task":
@@ -2142,6 +2377,8 @@ def dispatch(args):
             print(read_text(pj(project, "state.md")), end="")
     elif args.cmd == "sync":
         sync_projects(args.names or None, args.dry_run, args.workspace)
+    elif args.cmd == "unsync":
+        return unsync_project(args.name, args.dry_run, args.yes)
     elif args.cmd == "doctor":
         return doctor(args.names or None)
     return 0
