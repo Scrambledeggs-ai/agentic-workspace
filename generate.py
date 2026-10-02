@@ -90,11 +90,24 @@ PRIO_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 TASK_RE = re.compile(r"^- \[( |x)\] (T-\d+) \[(P[0-3])\] (.*)$")
 DATE_SUFFIX_RE = re.compile(r"(\s*\((?:creada|iniciada|hecha) \d{4}-\d{2}-\d{2}\))+\s*$")
 # git commit al inicio de un comando: tras un separador o dentro de sh -c "...", con sudo, env o VAR=valor delante.
-# No cuenta con --dry-run (no crea ningún commit).
 GIT_COMMIT_RE = re.compile(
     r"""(?:^|[;&|(\n]\s*|\b(?:ba|z|da)?sh\s+-[a-z]*c\s+["']\s*)"""
     r"""(?:(?:sudo|env)\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"""
-    r"""git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(?=\s|$|["')])(?![^;&|\n]*\s--dry-run(?:\s|$|["')]))""")
+    r"""git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(?=\s|$|["')])""")
+QUOTED_RE = re.compile(r""""(?:[^"\\]|\\.)*"|'[^']*'""")
+
+
+def is_git_commit(command):
+    # Con --dry-run no cuenta (no crea ningún commit). El texto entre comillas no se mira: un mensaje de
+    # commit que menciona --dry-run sigue siendo un commit real.
+    command = str(command or "")
+    for match in GIT_COMMIT_RE.finditer(command):
+        rest = QUOTED_RE.sub('""', command[match.end():])
+        arguments = re.split(r"[;&|\n]", rest, maxsplit=1)[0]
+        if not re.search(r"""(?:^|\s)--dry-run(?=\s|$|["')])""", arguments):
+            return True
+    return False
+
 
 HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
 
@@ -103,6 +116,12 @@ ASSET_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".mp4", "
 
 
 class AwError(Exception):
+    pass
+
+
+class AwEncodingError(AwError, ValueError):
+    # Archivo que no está en UTF-8. Como AwError llega al usuario con un mensaje claro; como ValueError,
+    # las lecturas de JSON lo tratan igual que un JSON inválido y siguen con lo demás.
     pass
 
 
@@ -142,7 +161,7 @@ def read_text(path):
     except (FileNotFoundError, IsADirectoryError):
         return ""
     except UnicodeDecodeError:
-        raise AwError(f"El archivo no está en UTF-8: {path}. Conviértelo a UTF-8 y repite el comando.") from None
+        raise AwEncodingError(f"El archivo no está en UTF-8: {path}. Conviértelo a UTF-8 y repite el comando.") from None
 
 
 def write_text(path, text):
@@ -312,7 +331,7 @@ def build(path, node, rel=""):
 
 
 def load_structure():
-    with open(STRUCTURE_FILE, "r") as f:
+    with open(STRUCTURE_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -354,7 +373,9 @@ def create_registry_item(folder):
     if not name:
         print("Nombre vacío, se cancela.")
         return
-    if "/" in name or "\\" in name or name.startswith("."):
+    try:
+        check_project_name(name)
+    except AwError:
         print("Nombre inválido.")
         return
     description = input("Descripción breve: ").strip()
@@ -363,8 +384,7 @@ def create_registry_item(folder):
     if os.path.exists(filepath):
         print("Ya existe un archivo con ese nombre.")
         return
-    with open(filepath, "w") as f:
-        f.write(make_header(name, description))
+    write_text(filepath, make_header(name, description))
     print(f"Creado: {folder}/{filename}")
 
 
@@ -389,7 +409,7 @@ def registry_menu(label, folder):
 # -- Proyectos --
 
 # Carpetas que dejan las herramientas de desarrollo: no son proyectos ni se recorren dentro de uno.
-HEAVY_DIRS = {"node_modules", "__pycache__"}
+HEAVY_DIRS = {"node_modules", "__pycache__", "venv"}
 # Carpetas de projects/ que nunca son un proyecto.
 NOT_PROJECTS = {"template_project"} | HEAVY_DIRS
 
@@ -439,7 +459,11 @@ def create_project(name, description=""):
         raise AwError("Ya existe un proyecto con ese nombre.")
     variables = project_vars(name, description)
     try:
-        shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"))
+        os.mkdir(target)  # si otra llamada la creó entretanto, falla aquí y no se toca lo que haya dentro
+    except FileExistsError:
+        raise AwError("Ya existe un proyecto con ese nombre.") from None
+    try:
+        shutil.copytree(template, target, ignore=shutil.ignore_patterns("*.bak-*"), dirs_exist_ok=True)
         render_tree(target, variables)
         # La plantilla del workspace puede venir de un aw anterior: los hooks y permisos se toman del repo.
         settings_text = repo_settings_text()
@@ -621,6 +645,7 @@ def clean_title(title):
 SENSITIVE_WORD = (r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key"
                   r"|[_.-]pass(?![A-Za-z])|(?<![A-Za-z])pass[_.-])")
 SENSITIVE_KEY = r"[\w.-]{0,64}" + SENSITIVE_WORD + r"[\w.-]{0,64}"
+FILE_NAME_RE = re.compile(r"\.(?:py|pyc|js|jsx|ts|tsx|mjs|cjs|json|md|txt|yml|yaml|toml|sh|rb|go|rs|java|kt|c|h|cpp|cs|php|html|css|scss|sql|log|lock)$", re.I)
 AUTH_SCHEME = r"(?:bearer|basic|token|digest|negotiate|api-?key)"
 REDACT_LIMIT = 2000  # caracteres que los hooks pasan a redact como máximo
 LONG_STRING_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])")
@@ -634,15 +659,21 @@ def mask_long_string(match):
     return "[oculto]"
 
 
+def mask_key_value(match):
+    # Un nombre de archivo seguido de ":" (test_pass.py:12:) no es una clave con su valor.
+    return match.group(0) if FILE_NAME_RE.search(match.group(1)) else match.group(1) + " [oculto]"
+
+
 def redact(text):
     text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:" + AUTH_SCHEME + r"\s+)?\S+)",
                   r"\1 [oculto]", text)
     text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [oculto]", text)
     text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
     text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
-    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)", r"\1 [oculto]", text)
+    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)", mask_key_value, text)
     # Opciones de línea de comandos con el valor separado por un espacio: --password x, --api-key x.
-    text = re.sub(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r"[\w-]*)\s+(?!\[oculto\]|-)(?:\"[^\"]*\"|'[^']*'|\S+)",
+    # La palabra sensible debe cerrar el nombre de la opción: --no-password-prompt o --token-limit no cuentan.
+    text = re.sub(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r")(?![\w-])\s+(?!\[oculto\]|-)(?:\"[^\"]*\"|'[^']*'|\S+)",
                   r"\1 [oculto]", text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
     return LONG_STRING_RE.sub(mask_long_string, text)
@@ -862,7 +893,9 @@ def refresh_state(project):
 # -- Índices derivados --
 
 def block_marks_ok(text):
-    return text.count(AUTO_START) == text.count(AUTO_END)
+    # Las marcas deben venir en parejas inicio…fin, en ese orden.
+    marks = re.findall(re.escape(AUTO_START) + "|" + re.escape(AUTO_END), text)
+    return len(marks) % 2 == 0 and all(mark == (AUTO_END if i % 2 else AUTO_START) for i, mark in enumerate(marks))
 
 
 def replace_block(path, body, header=None):
@@ -1072,7 +1105,7 @@ def hook_post_tool(payload, project):
     session_append(events, f"T {tool}\n")
     if tool == "Bash":
         command = str((payload.get("tool_input") or {}).get("command") or "")
-        if GIT_COMMIT_RE.search(command):
+        if is_git_commit(command):
             log_event(project, "commit", git_last_commit(payload.get("cwd") or project) or "(sin detalle)")
             session_append(events, "C\n")
 
@@ -1219,7 +1252,7 @@ def run_hook(event):
 # -- Sincronización con la plantilla --
 
 HOOK_SIGNATURE_RE = re.compile(
-    r"""(?:(?:^|[\s"'/\\])generate\.py["']?|(?:^|[\s"';&|(])aw)\s+hook\s+([a-z-]+)(?=$|[\s"';&|)])""")
+    r"""(?:(?:^|[\s"'/\\])generate\.py["']?|(?:^|[\s"';&|(/\\])aw["']?)\s+hook\s+([a-z-]+)(?=$|[\s"';&|)])""")
 
 
 def hook_signature(command):
@@ -1359,7 +1392,7 @@ def preview_template():
         preview = os.path.join(tmp, "template_project")
         source = os.path.join(ROOT, "projects", "template_project")
         if os.path.isdir(source):
-            shutil.copytree(source, preview)
+            shutil.copytree(source, preview, symlinks=True, ignore=shutil.ignore_patterns("*.bak-*"))
         node = as_dict(as_dict(load_structure().get("projects")).get("folders")).get("template_project")
         build(preview, node, os.path.join("projects", "template_project"))
         yield preview
@@ -1493,7 +1526,7 @@ def doctor_git(project):
     results = []
     if exposed:
         text = f"{len(exposed)} archivo(s) de aw no están ignorados por git y un `git add .` los incluiría: {', '.join(exposed)}."
-        if any(f.startswith(".claude/settings.json") for f in exposed):
+        if any(f.startswith(".claude/settings.json") or "/assigned_" in f for f in exposed):
             text += ("\n.claude/settings.json y las notas assigned_* llevan rutas absolutas de tu máquina; "
                      "el resto es estado generado.")
         text += f"\nPara ignorarlos solo en local, añade estas líneas a {exposure['exclude']}:"
@@ -1524,8 +1557,11 @@ def doctor_project(project):
                 if ".bak-" in fname:
                     continue
                 rel = os.path.relpath(os.path.join(dirpath, fname), template).replace(os.sep, "/")
-                if os.path.getsize(os.path.join(dirpath, fname)):
-                    fillable.add(rel)
+                try:
+                    if os.path.getsize(os.path.join(dirpath, fname)):
+                        fillable.add(rel)
+                except OSError:
+                    continue  # enlace simbólico roto en la plantilla: sync tampoco lo copia
                 if not os.path.exists(pj(project, *rel.split("/"))):
                     missing.append(rel)
         if missing:
@@ -1865,10 +1901,8 @@ def dispatch(args):
         elif args.tcmd == "done":
             task = task_done(project, args.id)
             print(f"{normalize_task_id(args.id)} hecha: {clean_title(task['title'])}")
-        elif args.tcmd == "list":
-            print_tasks(project, args.all)
         else:
-            raise AwError("Uso: aw task add|start|done|list")
+            print_tasks(project, args.all)
     elif args.cmd == "decide":
         project = resolve_project(args.project, write=True)
         decide(project, " ".join(args.title), args.why, args.alt)

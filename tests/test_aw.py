@@ -269,6 +269,26 @@ class TestEstructura(AwCase):
         created = self.aw(stdin="6\nb\nMi Agente\ndescripción\nc\n0\n")
         self.assertIn("Creado: agents/mi_agente.md", created.stdout)
 
+    def test_el_menu_escribe_y_lee_en_utf8_sin_depender_del_sistema(self):
+        self.init()
+        strict = [sys.executable, "-X", "warn_default_encoding", "-W", "error::EncodingWarning", SCRIPT]
+        result = subprocess.run(strict, cwd=self.tmp, env=self.env, input="6\nb\nDiseño\ncon acentos\na\nc\n0\n",
+                                capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Creado: agents/diseño.md", result.stdout)
+        self.assertIn("Diseño", result.stdout.split("Creado:")[1])
+        with open(os.path.join(self.ws, "agents", "diseño.md"), "rb") as f:
+            self.assertIn("Diseño".encode("utf-8"), f.read())
+
+    def test_un_entorno_virtual_sin_punto_no_es_proyecto_ni_se_indexa(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "venv", "lib", "modulo.py"), "x")
+        self.write(os.path.join(self.project("venv"), "lib", "modulo.py"), "x")
+        self.aw("sync")
+        self.assertEqual(load_aw(self.ws).list_projects(), ["demo"])
+        files = json.loads(self.read(project, "context_index.json"))["archivos"]
+        self.assertEqual([f for f in files if f.startswith("venv/")], [])
+
     def test_un_archivo_que_no_es_utf8_da_un_error_claro(self):
         project = self.new_project()
         path = os.path.join(project, "tasks", "backlog.md")
@@ -592,6 +612,7 @@ class TestHooks(AwCase):
         seen = []
         original = aw.redact
         aw.redact = lambda text: seen.append(len(text)) or original(text)
+        aw.session_path = lambda sid, suffix: os.path.join(self.sessions, f"aw-{sid}.{suffix}")  # no tocar el temporal real
         aw.hook_tool_failure(self.payload(project, tool_name="Bash", error="a." * 50000), project)
         self.assertLessEqual(max(seen), 2000)
         self.assertIn("[Bash] a.a.a.", self.read(project, "execution", "errors.md"))
@@ -1065,6 +1086,42 @@ class TestSync(AwCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("- b:", result.stdout)
 
+    def test_un_json_en_otra_codificacion_se_trata_como_invalido_y_no_detiene_nada(self):
+        project = self.new_project("a")
+        self.aw("project", "new", "b")
+        settings = os.path.join(project, ".claude", "settings.json")
+        raw = slurp(settings).replace("{", '{"nota": "año",', 1).encode("utf-16")
+        for rel in ((".claude", "settings.json"), ("context_index.json",), (".mcp.json",)):
+            with open(os.path.join(project, *rel), "wb") as f:
+                f.write(raw)
+        sync = self.aw("sync")
+        self.assertEqual(sync.returncode, 0, sync.stderr)
+        self.assertIn("JSON inválido; no se toca", sync.stdout)
+        self.assertIn("- b:", sync.stdout)
+        with open(settings, "rb") as f:
+            self.assertEqual(f.read(), raw)
+        doctor = self.aw("doctor")
+        self.assertEqual(doctor.returncode, 1, doctor.stderr)
+        self.assertIn("✕ .claude/settings.json tiene JSON inválido", doctor.stdout)
+        self.assertIn("Proyecto b", doctor.stdout)
+        with open(os.path.join(self.ws, "memory", "context_index.json"), "wb") as f:
+            f.write(raw)
+        self.assertIn("memory/context_index.json es inválido", self.aw("doctor").stdout)
+        self.assertEqual(self.aw("sync").returncode, 0)
+
+    def test_un_enlace_roto_en_la_plantilla_no_detiene_doctor_ni_el_modo_prueba(self):
+        self.new_project()
+        template = self.project("template_project")
+        os.symlink(os.path.join(self.tmp, "no-existe.md"), os.path.join(template, "sop", "roto.md"))
+        self.write(os.path.join(template, "sop", "rules.md.bak-20200101-000000"), "respaldo")
+        doctor = self.aw("doctor")
+        self.assertNotIn("Traceback", doctor.stderr)
+        self.assertIn("Resumen:", doctor.stdout)
+        dry = self.aw("sync", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertEqual(os.listdir(self.sessions), [])
+        self.assertEqual(self.aw("sync").returncode, 0)
+
     def test_sync_actualiza_la_plantilla_del_workspace(self):
         self.init()
         template = os.path.join(self.ws, "projects", "template_project", "skills")
@@ -1225,6 +1282,25 @@ class TestDoctor(AwCase):
         self.aw("sync")
         self.assertIn("- `artifacts/informe.html`", slurp(path))
         self.assertNotIn("desparejas", self.aw("doctor").stdout)
+
+    def test_bloque_automatico_con_marcas_invertidas_no_se_toca(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "artifacts", "informe.html"), "<html></html>")
+        path = os.path.join(project, "artifacts", "outputs.md")
+        text = "# Entregables\n<!-- aw:auto:fin -->\n<!-- aw:auto:inicio -->\nmi texto importante\n"
+        self.write(path, text)
+        self.aw("sync")
+        self.aw("sync")
+        self.assertEqual(slurp(path), text)
+        self.assertIn("▲ marcas aw:auto desparejas en artifacts/outputs.md", self.aw("doctor").stdout)
+
+    def test_doctor_explica_las_rutas_aunque_solo_queden_expuestas_las_notas_de_asignacion(self):
+        project = self.new_project("uno")
+        self.git(project, "init", "-q")
+        self.write(os.path.join(project, ".git", "info", "exclude"), "/.claude/\n/state.md\n/context_index.json\n/execution/\n/tools/\n")
+        out = self.aw("doctor", "uno").stdout
+        self.assertIn("2 archivo(s) de aw no están ignorados por git", out)
+        self.assertIn("rutas absolutas", out)
 
     def test_doctor_avisa_si_el_registro_mensual_no_tiene_cabecera(self):
         self.new_project()
@@ -1687,6 +1763,24 @@ class TestBloqueoYAtomicidad(AwCase):
         self.aw_mod.render_tree = original
         self.assertTrue(os.path.isdir(self.aw_mod.create_project("uno")))  # el nombre queda libre para reintentar
 
+    def test_create_project_no_borra_una_carpeta_que_no_creo(self):
+        # Carrera: otra llamada crea la carpeta entre la comprobación y la copia.
+        self.init()
+        target = self.project("uno")
+        real_exists = os.path.exists
+
+        def exists(path):
+            return False if path == target else real_exists(path)
+
+        self.write(os.path.join(target, "ajeno.txt"), "de otro proceso")
+        self.aw_mod.os.path.exists = exists
+        try:
+            with self.assertRaises(self.aw_mod.AwError):
+                self.aw_mod.create_project("uno")
+        finally:
+            self.aw_mod.os.path.exists = real_exists
+        self.assertEqual(slurp(os.path.join(target, "ajeno.txt")), "de otro proceso")
+
     def test_project_lock_es_reentrante(self):
         project = self.new_project()
         self.aw_mod.LOCK_TIMEOUT = 0.3  # si no fuera reentrante, fallaría en 0,3 s en vez de colgarse
@@ -1809,7 +1903,10 @@ class TestFunciones(AwCase):
     def test_redact_no_oculta_de_mas(self):
         r = self.aw_mod.redact
         for text in ("authorization failed for user", "Could not resolve host", "the secret was rotated",
-                     "pass: 3 fail: 0", "tests passed=3", "bypass=1", "--password --verbose"):
+                     "pass: 3 fail: 0", "tests passed=3", "bypass=1", "--password --verbose",
+                     "tests/test_pass.py:12: AssertionError", "Error: file my_pass.txt: not found",
+                     "git: --no-password-prompt is not valid here", "modelo --token-limit 5 excedido",
+                     "src/token_utils.py:12: error de sintaxis", "ver secret_manager.md: sección 2"):
             self.assertEqual(r(text), text)
 
     def test_clean_title(self):
@@ -1823,19 +1920,22 @@ class TestFunciones(AwCase):
         self.assertEqual(out.splitlines(), ["# Pendientes", "<!-- x -->", "- [ ] T-001 [P0] a", "- [ ] T-003 [P1] c", "- [ ] T-002 [P2] b"])
         self.assertEqual(insert("", "- [ ] T-001 [P2] a", "P2"), "- [ ] T-001 [P2] a\n")
 
-    def test_git_commit_regex(self):
-        rx = self.aw_mod.GIT_COMMIT_RE
+    def test_is_git_commit(self):
+        check = self.aw_mod.is_git_commit
         for yes in ("git commit -m x", "git commit", "cd a && git commit -m y", "git -c user.name=a commit -m y",
                     "git --no-pager commit", "npm test; git commit -am z",
                     "git add -A\ngit commit -m x", "cd a\n  git commit -m y", "(git commit -m x)", "echo $(git commit -m x)",
                     "sudo git commit -m x", "GIT_AUTHOR_NAME=a git commit -m x", "env A=1 B=2 git commit",
-                    'bash -c "git commit -m x"', "sh -c 'git commit'", "cd a && sudo A=1 git commit -m x"):
-            self.assertTrue(rx.search(yes), yes)
+                    'bash -c "git commit -m x"', "sh -c 'git commit'", "cd a && sudo A=1 git commit -m x",
+                    'git commit -m "sync --dry-run compara contra la plantilla"', "git commit -m 'doc: explica --dry-run'",
+                    "bash -c \"git commit -m 'x --dry-run'\"", "git commit --dry-run; git commit -m x",
+                    "git commit --dry-run\ngit commit -m x"):
+            self.assertTrue(check(yes), yes)
         for no in ("git log --grep commit", "echo git commit-tree", "git status", "git committer", "ls",
                    "echo hola\ngit log --grep commit", "git commit --dry-run", "git commit -m x --dry-run",
-                   'echo "git commit -m x"', "sudo git status", "A=1 git log"):
-            self.assertFalse(rx.search(no), no)
-        self.assertTrue(rx.search("git commit --dry-run; git commit -m x"))
+                   'echo "git commit -m x"', "sudo git status", "A=1 git log", 'git commit -m "a; b" --dry-run',
+                   'bash -c "git commit --dry-run"', "git commit --dry-run && git status", "", None):
+            self.assertFalse(check(no), no)
 
     def test_merge_settings_no_modifica_el_original(self):
         existing = {"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "otro.sh"}]}]}}
@@ -1892,7 +1992,8 @@ class TestFunciones(AwCase):
         sig = self.aw_mod.hook_signature
         for command in ('python3 "/a b/generate.py" hook stop', "python3 '/a b/generate.py' hook stop",
                         "python3 /a/generate.py hook stop", 'bash -c "python3 /a/generate.py hook stop"',
-                        "sh -c 'aw hook stop'", "aw hook stop", "cd /x && aw hook stop"):
+                        "sh -c 'aw hook stop'", "aw hook stop", "cd /x && aw hook stop",
+                        "/home/u/.local/bin/aw hook stop", "./aw hook stop", '"/home/u/mi bin/aw" hook stop'):
             self.assertEqual(sig(command), "stop", command)
         for command in ("otra-tool hook stop", "otra-aw hook stop", "python3 mi-generate.py hook stop",
                         "aw hook inventado", "aw hook stop-all", None, 5):
