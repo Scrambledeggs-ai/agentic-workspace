@@ -1193,10 +1193,15 @@ def run_hook(event):
 
 # -- Sincronización con la plantilla --
 
+HOOK_SIGNATURE_RE = re.compile(
+    r"""(?:(?:^|[\s"'/\\])generate\.py["']?|(?:^|[\s"';&|(])aw)\s+hook\s+([a-z-]+)(?=$|[\s"';&|)])""")
+
+
 def hook_signature(command):
-    # Solo reconoce los hooks de aw (generate.py o aw seguido de "hook <nombre>"); los demás devuelven None.
-    match = re.search(r'(?:generate\.py"?|\baw)\s+hook\s+([a-z-]+)(?:\s|$)', str(command or ""))
-    return match.group(1) if match else None
+    # Solo reconoce los hooks de aw: generate.py o aw como palabra completa, seguido de "hook <evento conocido>",
+    # con o sin comillas alrededor (también dentro de bash -c "..."). Los demás devuelven None.
+    match = HOOK_SIGNATURE_RE.search(str(command or ""))
+    return match.group(1) if match and match.group(1) in HOOK_EVENTS else None
 
 
 def hook_key(hook):

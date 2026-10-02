@@ -1742,6 +1742,25 @@ class TestFunciones(AwCase):
         self.assertEqual(merged["hooks"]["Stop"][0], existing["hooks"]["Stop"][0])
         self.assertEqual(notes, ["hook Stop"])
 
+    def test_hook_signature_reconoce_variantes_y_no_toma_comandos_ajenos(self):
+        sig = self.aw_mod.hook_signature
+        for command in ('python3 "/a b/generate.py" hook stop', "python3 '/a b/generate.py' hook stop",
+                        "python3 /a/generate.py hook stop", 'bash -c "python3 /a/generate.py hook stop"',
+                        "sh -c 'aw hook stop'", "aw hook stop", "cd /x && aw hook stop"):
+            self.assertEqual(sig(command), "stop", command)
+        for command in ("otra-tool hook stop", "otra-aw hook stop", "python3 mi-generate.py hook stop",
+                        "aw hook inventado", "aw hook stop-all", None, 5):
+            self.assertIsNone(sig(command), command)
+
+    def test_merge_settings_no_duplica_un_hook_de_aw_escrito_de_otra_forma(self):
+        new = {"type": "command", "command": 'python3 "x/generate.py" hook stop', "timeout": 10}
+        template = {"hooks": {"Stop": [{"hooks": [new]}]}}
+        for command in ("python3 'x/generate.py' hook stop", 'bash -c "python3 x/generate.py hook stop"'):
+            existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": command}]}]}}
+            merged, notes = self.aw_mod.merge_settings(existing, template)
+            self.assertEqual(merged["hooks"]["Stop"], [{"hooks": [new]}], command)
+            self.assertEqual(notes, ["hook Stop actualizado"])
+
     def test_merge_settings_actualiza_en_su_sitio_los_hooks_de_aw(self):
         old = {"type": "command", "command": 'python3 "/viejo/generate.py" hook stop', "timeout": 5, "async": True}
         new = {"type": "command", "command": 'python3 "x/generate.py" hook stop', "timeout": 10}
