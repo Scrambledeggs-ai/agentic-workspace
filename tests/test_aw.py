@@ -781,6 +781,23 @@ class TestSync(AwCase):
         self.assertIn("rellenar: tasks/backlog.md", result.stdout)
         self.assertEqual(self.snapshot(project), snapshot)
 
+    def test_dry_run_anticipa_lo_que_sync_trae_de_la_plantilla_del_repo(self):
+        # La plantilla del workspace quedó atrás (le falta un archivo): sync la completa antes de comparar.
+        project = self.new_project()
+        rel = os.path.join("skills", "assigned_skills.md")
+        os.remove(os.path.join(self.project("template_project"), rel))
+        os.remove(os.path.join(project, rel))
+        snapshot = self.snapshot(self.ws)
+        dry = self.aw("sync", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("crear: skills/assigned_skills.md", dry.stdout)
+        self.assertEqual(self.snapshot(self.ws), snapshot)
+        self.assertEqual(os.listdir(self.sessions), [])
+        real = self.aw("sync")
+        changes = [line for line in dry.stdout.splitlines() if line.startswith("    ")]
+        self.assertEqual(changes, [line for line in real.stdout.splitlines() if line.startswith("    ")])
+        self.assertTrue(os.path.isfile(os.path.join(project, rel)))
+
     def snapshot(self, project):
         data = {}
         for dirpath, _dirs, files in os.walk(project):

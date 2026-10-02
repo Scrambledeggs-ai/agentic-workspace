@@ -1332,16 +1332,38 @@ def sync_project(project, template, dry_run=False):
     return changes
 
 
+@contextlib.contextmanager
+def preview_template():
+    # Copia temporal de la plantilla del workspace, completada como lo haría build(): así el modo prueba
+    # compara contra la misma plantilla que usará la sincronización real, sin tocar el workspace.
+    tmp = tempfile.mkdtemp(prefix="aw-plantilla-")
+    try:
+        preview = os.path.join(tmp, "template_project")
+        source = os.path.join(ROOT, "projects", "template_project")
+        if os.path.isdir(source):
+            shutil.copytree(source, preview)
+        node = as_dict(as_dict(load_structure().get("projects")).get("folders")).get("template_project")
+        build(preview, node, os.path.join("projects", "template_project"))
+        yield preview
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def sync_projects(names=None, dry_run=False, workspace=False):
     check_project_names(names)
-    template = os.path.join(ROOT, "projects", "template_project")
-    if not dry_run:
-        build(ROOT, load_structure())
+    if dry_run:
+        with preview_template() as template:
+            return sync_from_template(template, names, True, workspace)
+    build(ROOT, load_structure())
+    return sync_from_template(os.path.join(ROOT, "projects", "template_project"), names, False, workspace)
+
+
+def sync_from_template(template, names, dry_run, workspace):
     if not os.path.isdir(template):
         raise AwError("No existe template_project. Ejecuta primero 'aw init'.")
     projects = names or list_projects()
     if dry_run:
-        print("Modo prueba: no se cambia nada. La plantilla del workspace tampoco se actualiza (usa 'aw init' para eso).")
+        print("Modo prueba: no se cambia nada. Se muestra lo que haría 'aw sync'.")
     total = 0
     action, detail = ensure_workspace_claude_md(dry_run=dry_run, force=workspace)
     if action in ("crear", "marcar", "actualizar"):
