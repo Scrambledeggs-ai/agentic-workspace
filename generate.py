@@ -115,6 +115,10 @@ HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "sto
 
 TEXT_EXT = (".md", ".json")  # los únicos archivos que aw interpreta; lo demás no lo lee
 
+
+def is_text_file(name):
+    return name.lower().endswith(TEXT_EXT)
+
 ARTIFACT_INDEX_FILES = ("outputs.md", "code_snippets.md", "assets_index.md")
 ASSET_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".mp4", ".mov", ".mp3", ".wav", ".fig"}
 
@@ -440,7 +444,7 @@ def summary_line(filepath):
 def render_tree(root_dir, variables):
     for dirpath, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if not fname.endswith(TEXT_EXT):
+            if not is_text_file(fname):
                 continue
             fpath = os.path.join(dirpath, fname)
             text = read_text(fpath)
@@ -450,8 +454,13 @@ def render_tree(root_dir, variables):
 
 
 def ignore_template_extras(dirpath, names):
-    # Al copiar la plantilla no se llevan los respaldos ni los enlaces simbólicos rotos.
-    return [n for n in names if ".bak-" in n or not os.path.exists(os.path.join(dirpath, n))]
+    # Al copiar la plantilla solo se llevan carpetas y archivos .md y .json (la misma regla que en sync), sin
+    # respaldos ni enlaces simbólicos rotos.
+    def skip(name):
+        path = os.path.join(dirpath, name)
+        return ".bak-" in name or not os.path.exists(path) or not (os.path.isdir(path) or is_text_file(name))
+
+    return [name for name in names if skip(name)]
 
 
 def create_project(name, description=""):
@@ -1396,10 +1405,10 @@ def walk_order(rel):
 
 def template_files(template):
     # Los archivos de la plantilla que aw gestiona, como (ruta relativa, ruta): solo .md y .json, sin respaldos.
-    # Lo demás (un .DS_Store, una imagen) no se lee ni se lleva a los proyectos.
+    # Lo demás (un .DS_Store, una imagen) no se lee ni se lleva a los proyectos, tampoco a los nuevos.
     for dirpath, _dirs, files in os.walk(template):
         for fname in files:
-            if fname.endswith(TEXT_EXT) and ".bak-" not in fname:
+            if is_text_file(fname) and ".bak-" not in fname:
                 path = os.path.join(dirpath, fname)
                 yield os.path.relpath(path, template).replace(os.sep, "/"), path
 
@@ -1706,14 +1715,16 @@ def doctor_project(project):
     for folder, label in (("agents", "agentes"), ("skills", "skills")):
         notes = pj(project, folder, f"assigned_{folder}.md")
         for cells in markdown_rows(read_text(notes)):
-            if len(cells) < 2 or not cells[1] or cells[1] == "(completar)":
-                continue
             # Se acepta el nombre del archivo, la ruta desde la raíz (agents/x.md), una ruta absoluta o con ~,
             # y cualquiera de ellas entre comillas invertidas.
-            name = cells[1].strip("`").strip()
+            name = cells[1].strip("`").strip() if len(cells) >= 2 else ""
+            if not name or name == "(completar)":
+                continue
             target = os.path.expanduser(name)
-            candidates = [target] if os.path.isabs(target) else [os.path.join(ROOT, folder, target), os.path.join(ROOT, target)]
-            if not any(os.path.exists(candidate) for candidate in candidates):
+            if not os.path.isabs(target):
+                relative = target[len(folder) + 1:] if target.startswith(folder + "/") else target
+                target = os.path.join(ROOT, folder, relative)
+            if not os.path.exists(target):
                 add("bad", f"{label} asignados: no existe {name} (fila '{cells[0]}')")
 
     mcp_names = set()
@@ -1978,8 +1989,11 @@ def main(argv=None):
     if not argv:
         try:
             main_menu()
-        except (EOFError, KeyboardInterrupt):
-            print("\nHasta luego.")  # Ctrl-D, Ctrl-C o entrada sin terminal: se sale como con la opción 0
+        except EOFError:
+            print("\nHasta luego.")  # Ctrl-D o entrada sin terminal: se sale como con la opción 0
+        except KeyboardInterrupt:
+            print("\nInterrumpido.")
+            return 130
         return 0
     if argv[0] == "hook":
         return run_hook(argv[1] if len(argv) > 1 else "")

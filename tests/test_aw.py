@@ -262,7 +262,7 @@ class TestEstructura(AwCase):
                            r"fijate|completá|escribí|poné|dejá|guardá|revisá|ingresá|vos)\b", re.I)
         paths = [SCRIPT, os.path.join(REPO, "Readme.md")]
         for dirpath, _dirs, files in os.walk(os.path.join(REPO, "templates")):
-            paths += [os.path.join(dirpath, f) for f in files]
+            paths += [os.path.join(dirpath, f) for f in files if f.lower().endswith((".md", ".json"))]
         found = [f"{os.path.relpath(path, REPO)}:{number}: {match.group(0)}"
                  for path in paths for number, line in enumerate(slurp(path).splitlines(), 1)
                  for match in voseo.finditer(line)]
@@ -285,7 +285,7 @@ class TestEstructura(AwCase):
 
         aw.input = ctrl_c
         with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
-            self.assertEqual(aw.main([]), 0)
+            self.assertEqual(aw.main([]), 130)  # una interrupción no es una salida normal
 
     def test_el_menu_no_crea_agentes_skills_ni_herramientas_fuera_de_su_carpeta(self):
         self.init()
@@ -1257,8 +1257,18 @@ class TestSync(AwCase):
         doctor = self.aw("doctor")
         self.assertIn("✓ estructura completa", doctor.stdout)
         self.assertNotIn("faltan", doctor.stdout)
-        for rel in (".DS_Store", os.path.join("sop", "logo.png"), os.path.join("sop", "notas.txt")):
-            self.assertFalse(os.path.exists(os.path.join(project, rel)), rel)
+        self.assertEqual(self.aw("project", "new", "otro").returncode, 0)
+        for rel in (".DS_Store", os.path.join("sop", ".DS_Store"), os.path.join("sop", "logo.png"),
+                    os.path.join("sop", "notas.txt")):
+            for name in ("demo", "otro"):
+                self.assertFalse(os.path.exists(os.path.join(self.project(name), rel)), (name, rel))
+        self.assertTrue(os.path.isfile(os.path.join(self.project("otro"), "sop", "rules.md")))
+        # La extensión cuenta sin distinguir mayúsculas.
+        self.write(os.path.join(template, "sop", "GUIA.MD"), "Guía de @@PROJECT@@\n")
+        self.assertIn("crear: sop/GUIA.MD", self.aw("sync").stdout)
+        self.assertEqual(self.read(project, "sop", "GUIA.MD"), "Guía de demo\n")
+        self.aw("project", "new", "tercero")
+        self.assertEqual(self.read(self.project("tercero"), "sop", "GUIA.MD"), "Guía de tercero\n")
         # Un .md de la plantilla mal codificado sí es asunto de aw: error claro con su nombre.
         bad = os.path.join(template, "sop", "rules.md")
         with open(bad, "wb") as f:
@@ -1379,17 +1389,20 @@ class TestDoctor(AwCase):
                    f"| Absoluta | {absolute} | |\n")
         self.write(os.path.join(project, "skills", "assigned_skills.md"),
                    "# Skills\n\n| Tarea | Skill | Notas |\n|---|---|---|\n"
-                   "| Carpeta | skills/auditor.skill | |\n| Comillas | `auditor.skill` | |\n")
+                   "| Carpeta | skills/auditor.skill | |\n| Comillas | `auditor.skill` | |\n"
+                   "| Sin completar | `(completar)` | |\n| Vacía | `` | |\n")
         result = self.aw("doctor")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn("asignados", result.stdout)
         self.write(os.path.join(project, "agents", "assigned_agents.md"),
                    "# Agentes\n\n| Tarea | Agente (archivo) | Notas |\n|---|---|---|\n"
-                   "| Falta | `agents/no_existe.md` | |\n| Fuera | ../../no_existe.md | |\n")
+                   "| Falta | `agents/no_existe.md` | |\n| Fuera | ../../no_existe.md | |\n"
+                   "| Raíz | CLAUDE.md | |\n| Otra carpeta | core/config.md | |\n| De skills | skills/auditor.skill | |\n")
         result = self.aw("doctor")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("✕ agentes asignados: no existe agents/no_existe.md (fila 'Falta')", result.stdout)
-        self.assertIn("✕ agentes asignados: no existe ../../no_existe.md (fila 'Fuera')", result.stdout)
+        for cell, row in (("agents/no_existe.md", "Falta"), ("../../no_existe.md", "Fuera"), ("CLAUDE.md", "Raíz"),
+                          ("core/config.md", "Otra carpeta"), ("skills/auditor.skill", "De skills")):
+            self.assertIn(f"✕ agentes asignados: no existe {cell} (fila '{row}')", result.stdout)
 
     def test_compara_herramientas_con_mcp_json(self):
         project = self.new_project()
