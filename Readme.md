@@ -6,7 +6,7 @@ Proyecto de scripts en Python para creacion de entorno de carpetas para trabajar
 
 ## Requisitos
 
-* Python 3 instalado
+* Python 3.10 o superior (la integración continua lo prueba con 3.10 y 3.13, en Linux y macOS)
 * Git instalado
 
 Verificar instalación:
@@ -22,7 +22,7 @@ git --version
 
 Este proyecto no requiere librerías externas ni paquetes adicionales.
 
-Una instalación estándar de Python 3 es suficiente para ejecutarlo.
+Una instalación estándar de Python 3.10 o superior es suficiente para ejecutarlo.
 
 ---
 
@@ -50,9 +50,37 @@ agentic-workspace/
 ├── structure.json    esquema de carpetas y archivos del workspace
 ├── templates/        contenido inicial de los archivos del esquema
 ├── tests/            pruebas (solo biblioteca estándar)
-├── .gitignore
-└── README.md
+├── .github/          integración continua (pruebas en cada push)
+├── CHANGELOG.md      cambios de cada versión
+├── CONTRIBUTING.md   cómo proponer cambios
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md       cómo informar de una vulnerabilidad
+├── LICENSE
+└── Readme.md
 ```
+
+## Arquitectura
+
+aw es un solo archivo, `generate.py`, que usa solo la biblioteca estándar de Python y `git`. Las mismas funciones
+sirven al menú, a los comandos y a los hooks de Claude Code.
+
+* **Código y workspace, separados.** El repositorio solo tiene el código. El workspace que genera (`core/`,
+  `memory/`, `projects/`, etc.) vive en la raíz que indica `AW_HOME` o, si el clon está en
+  `<raíz>/projects/<nombre>/`, dos niveles más arriba. Por eso el `.gitignore` excluye todo lo generado.
+* **Esquema y plantillas.** `structure.json` describe el árbol de carpetas y archivos; `templates/` tiene el
+  contenido inicial de cada uno, con variables como `@@ROOT@@` o `@@PROJECT@@`. Un archivo que ya tiene texto no
+  se toca nunca. Para cambiar lo que se crea se editan esos dos, no el código.
+* **Proyectos.** Cada proyecto es una carpeta de `projects/` con su estado en archivos: tareas, decisiones,
+  registro de ejecución y errores. Se clona de `projects/template_project`.
+* **Hooks.** El `.claude/settings.json` de cada proyecto registra seis hooks que llaman a `aw hook <evento>`.
+  Son síncronos, nunca bloquean la sesión y guardan su estado temporal en archivos privados del directorio
+  temporal.
+* **Sincronización y diagnóstico.** `aw sync` lleva lo nuevo de la plantilla a cada proyecto sin reemplazar
+  contenido; `aw doctor` informa qué falta o está desactualizado.
+* **Consistencia.** Las escrituras de cada proyecto se hacen bajo un bloqueo (`flock`) y de forma atómica; mover
+  una tarea escribe primero el destino, así que un corte la deja duplicada, nunca perdida.
+* **Secretos.** Lo que deriva de la salida de una herramienta o de `git log` pasa por `redact()` antes de
+  guardarse.
 
 ---
 
@@ -209,7 +237,7 @@ Cada prueba usa un workspace temporal (`AW_HOME`), así que no toca el workspace
 
 ## Documentación
 
-Manual de uso: [Agentic Workspace — manual](https://claude.ai/code/artifact/74ecf23d-4272-42a7-94ae-eeecfc6f13ca)
+Manual de uso: [Manual de Agentic Workspace 1.0](https://claude.ai/artifact/NJJk1s6GcNVvkWsw6UKtrb). Incluye la migración de proyectos existentes, cómo deshacerla y cómo actualizar aw.
 
 ---
 
@@ -228,7 +256,7 @@ Subir cambios a GitHub:
 git push
 ```
 
-Actualizar el repositorio local:
+Actualizar el repositorio local (para actualizar aw instalado, usa `aw update`):
 
 ```bash
 git pull
@@ -243,6 +271,14 @@ git pull
 * No subir credenciales, tokens ni información sensible.
 * Mantener `.gitignore` actualizado para excluir archivos temporales y locales.
 * Realizar commits pequeños y frecuentes.
+
+---
+
+## Seguridad y contribuciones
+
+* Para informar de una vulnerabilidad, sigue [SECURITY.md](SECURITY.md).
+* Para proponer cambios, lee [CONTRIBUTING.md](CONTRIBUTING.md) y el [código de conducta](CODE_OF_CONDUCT.md).
+* Los cambios de cada versión están en [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
