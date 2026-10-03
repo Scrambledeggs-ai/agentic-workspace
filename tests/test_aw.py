@@ -1794,6 +1794,132 @@ class TestDeshacer(AwCase):
         self.assertEqual(self.tree(folder), before)
 
 
+class TestActualizar(AwCase):
+    """aw update: trae lo nuevo del remoto del clon, solo como avance directo, y sincroniza con el código nuevo."""
+
+    def setUp(self):
+        super().setUp()
+        # Un repositorio que hace de GitHub y un clon que hace de instalación; el repo real no se toca.
+        self.origin = os.path.join(self.tmp, "origen")
+        os.makedirs(self.origin)
+        for name in ("generate.py", "structure.json"):
+            shutil.copy(os.path.join(REPO, name), self.origin)
+        shutil.copytree(os.path.join(REPO, "templates"), os.path.join(self.origin, "templates"))
+        self.git(self.origin, "init", "-q")
+        self.git(self.origin, "checkout", "-q", "-b", "principal")
+        self.commit(self.origin, "inicial")
+        self.install = os.path.join(self.tmp, "instalacion")
+        self.git(self.tmp, "clone", "-q", self.origin, self.install)
+        self.assertEqual(self.run_installed("init").returncode, 0)
+
+    def commit(self, repo, message):
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", message)
+
+    def head(self, repo):
+        return self.git(repo, "rev-parse", "HEAD").strip()
+
+    def run_installed(self, *args, stdin=""):
+        return subprocess.run([sys.executable, os.path.join(self.install, "generate.py"), *args], cwd=self.tmp,
+                              env=self.env, input=stdin, capture_output=True, text=True)
+
+    def publish(self, message="versión nueva"):
+        # Una versión nueva en el origen: cambia un mensaje de sync.
+        path = os.path.join(self.origin, "generate.py")
+        self.write(path, slurp(path).replace("índice de proyectos al día", "índice de proyectos al día (v2)"))
+        self.commit(self.origin, message)
+
+    def test_update_trae_lo_nuevo_y_sincroniza_con_el_codigo_nuevo(self):
+        self.assertEqual(self.run_installed("project", "new", "demo").returncode, 0)
+        self.publish("mejora de prueba")
+        result = self.run_installed("update")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.head(self.install), self.head(self.origin))
+        self.assertIn("Hay 1 commit(s) nuevos en origin/principal:", result.stdout)
+        self.assertIn("mejora de prueba", result.stdout)
+        self.assertIn("aw actualizado:", result.stdout)
+        self.assertIn("índice de proyectos al día (v2)", result.stdout)  # sync corrió con el código nuevo
+        self.assertIn("- demo: al día", result.stdout)
+        again = self.run_installed("update")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("aw ya está al día", again.stdout)
+
+    def test_el_modo_prueba_muestra_las_novedades_sin_actualizar(self):
+        before = self.head(self.install)
+        self.publish()
+        result = self.run_installed("update", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Hay 1 commit(s) nuevos", result.stdout)
+        self.assertIn("Modo prueba: no se actualizó nada.", result.stdout)
+        self.assertEqual(self.head(self.install), before)
+        self.assertNotIn("(v2)", slurp(os.path.join(self.install, "generate.py")))
+
+    def test_con_cambios_locales_no_se_actualiza(self):
+        before = self.head(self.install)
+        self.publish()
+        path = os.path.join(self.install, "structure.json")
+        self.write(path, slurp(path) + "\n")
+        result = self.run_installed("update")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Hay cambios locales sin guardar", result.stderr)
+        self.assertEqual(self.head(self.install), before)
+        self.assertTrue(slurp(path).endswith("\n\n"))
+
+    def test_los_archivos_sin_seguimiento_no_impiden_actualizar(self):
+        self.publish()
+        self.write(os.path.join(self.install, "notas.md"), "mías\n")
+        result = self.run_installed("update")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.head(self.install), self.head(self.origin))
+        self.assertEqual(slurp(os.path.join(self.install, "notas.md")), "mías\n")
+
+    def test_con_historias_separadas_no_se_mezcla(self):
+        self.write(os.path.join(self.install, "local.md"), "x\n")
+        self.commit(self.install, "commit propio")
+        before = self.head(self.install)
+        ahead = self.run_installed("update")
+        self.assertEqual(ahead.returncode, 0, ahead.stderr)
+        self.assertIn("Hay 1 commit(s) locales sin publicar", ahead.stdout)
+        self.publish()
+        result = self.run_installed("update")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("las historias se separaron", result.stderr)
+        self.assertEqual(self.head(self.install), before)
+
+    def test_una_rama_sin_remoto_no_se_actualiza(self):
+        self.publish()
+        self.git(self.install, "checkout", "-q", "-b", "feat/propia")
+        before = self.head(self.install)
+        result = self.run_installed("update")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no sigue a ninguna rama remota", result.stderr)
+        self.assertEqual(self.head(self.install), before)
+
+    def test_una_instalacion_sin_git_lo_dice(self):
+        shutil.rmtree(os.path.join(self.install, ".git"))
+        result = self.run_installed("update")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no es un clon de git", result.stderr)
+        self.assertIn("Actualiza a mano", result.stderr)
+
+    def test_si_el_remoto_no_responde_no_se_toca_nada(self):
+        before = self.head(self.install)
+        shutil.rmtree(self.origin)
+        result = self.run_installed("update")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("No se pudo consultar el repositorio remoto (origin)", result.stderr)
+        self.assertEqual(self.head(self.install), before)
+
+    def test_el_menu_ofrece_actualizar(self):
+        self.publish()
+        result = self.run_installed(stdin="12\ns\n0\n")
+        self.assertIn("12) Actualizar aw desde su repositorio", result.stdout)
+        self.assertIn("Modo prueba: no se actualizó nada.", result.stdout)
+        result = self.run_installed(stdin="12\nn\n0\n")
+        self.assertIn("aw actualizado:", result.stdout)
+        self.assertEqual(self.head(self.install), self.head(self.origin))
+
+
 class TestDoctor(AwCase):
     def test_proyecto_nuevo_sin_pendientes_graves(self):
         self.new_project()

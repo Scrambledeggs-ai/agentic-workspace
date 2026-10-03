@@ -78,6 +78,7 @@ MENU = """
 9) Instalar comando 'aw' en el sistema
 10) Diagnóstico de proyectos
 11) Sincronizar proyectos con la plantilla
+12) Actualizar aw desde su repositorio
 0) Salir
 """
 
@@ -2209,6 +2210,77 @@ def action_install_command():
         print(f"Ya puedes usar el comando '{WRAPPER_NAME}' desde cualquier carpeta.")
 
 
+# -- Actualización de aw desde su repositorio --
+
+def repo_git(*args, timeout=60):
+    try:
+        return subprocess.run(["git", *args], cwd=HERE, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def repo_git_out(*args):
+    result = repo_git(*args)
+    return result.stdout.strip() if result and result.returncode == 0 else None
+
+
+def update_aw(dry_run=False):
+    # Trae lo nuevo del remoto que ya tiene configurado el clon, solo si es un avance directo, y sincroniza con
+    # el código nuevo. Nunca mezcla ni descarta nada: ante cambios locales o historias distintas, se niega.
+    manual = "Actualiza a mano: descarga la versión nueva del repositorio y reemplaza los archivos de aw."
+    top = repo_git_out("rev-parse", "--show-toplevel")
+    if top is None or os.path.realpath(top) != os.path.realpath(HERE):
+        raise AwError(f"La carpeta de aw ({HERE}) no es un clon de git: no se puede actualizar sola. {manual}")
+    branch = repo_git_out("symbolic-ref", "--short", "-q", "HEAD")
+    upstream = repo_git_out("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") if branch else None
+    if not upstream:
+        raise AwError(f"La rama actual de aw ({branch or 'sin rama'}) no sigue a ninguna rama remota: "
+                      "no hay de dónde actualizar. Cambia a la rama principal y repite.")
+    if repo_git_out("status", "--porcelain", "--untracked-files=no"):
+        raise AwError(f"Hay cambios locales sin guardar en {HERE}: no se actualiza para no mezclarlos. "
+                      "Guárdalos en un commit o descártalos y repite.")
+    remote = upstream.split("/", 1)[0]
+    fetched = repo_git("fetch", "--quiet", remote, timeout=120)
+    if fetched is None or fetched.returncode != 0:
+        detail = first_line(fetched.stderr) if fetched else "git no respondió"
+        raise AwError(f"No se pudo consultar el repositorio remoto ({remote}): {detail}")
+    behind = int(repo_git_out("rev-list", "--count", "HEAD..@{u}") or 0)
+    ahead = int(repo_git_out("rev-list", "--count", "@{u}..HEAD") or 0)
+    current = repo_git_out("rev-parse", "--short", "HEAD")
+    if not behind:
+        print(f"aw ya está al día ({current}, rama {branch})."
+              + (f" Hay {ahead} commit(s) locales sin publicar." if ahead else ""))
+        return 0
+    if ahead:
+        raise AwError(f"La instalación tiene {ahead} commit(s) propios y el remoto {behind} nuevos: las historias "
+                      "se separaron y aw no las mezcla. Resuélvelo con git y repite.")
+    print(f"Hay {behind} commit(s) nuevos en {upstream}:")
+    lines = (repo_git_out("log", "--oneline", "--no-decorate", "HEAD..@{u}") or "").splitlines()
+    for line in lines[:20]:
+        print(f"  {line}")
+    if len(lines) > 20:
+        print(f"  ... y {len(lines) - 20} más")
+    if dry_run:
+        print("Modo prueba: no se actualizó nada.")
+        return 0
+    merged = repo_git("merge", "--ff-only", "--quiet", "@{u}")
+    if merged is None or merged.returncode != 0:
+        detail = first_line(merged.stderr) if merged else "git no respondió"
+        raise AwError(f"No se pudo aplicar la actualización: {detail}")
+    print(f"aw actualizado: {current} -> {repo_git_out('rev-parse', '--short', 'HEAD')}. Sincronizando con la versión nueva:")
+    sys.stdout.flush()
+    # Este proceso sigue siendo el código anterior: la sincronización se lanza aparte para usar el nuevo.
+    return subprocess.run([sys.executable, os.path.abspath(__file__), "sync"]).returncode
+
+
+def action_update():
+    answer = input("¿Solo mostrar si hay novedades, sin actualizar? (s/n): ").strip().lower()
+    try:
+        update_aw(dry_run=(answer != "n"))
+    except AwError as exc:
+        print(exc)
+
+
 # -- Menú principal --
 
 def action_doctor():
@@ -2252,6 +2324,8 @@ def main_menu():
                 action_doctor()
             elif choice == "11":
                 action_sync()
+            elif choice == "12":
+                action_update()
             elif choice == "0":
                 print("Hasta luego.")
                 break
@@ -2316,6 +2390,9 @@ def build_parser():
     unsync.add_argument("--dry-run", action="store_true", help="muestra lo que haría sin borrar nada")
     unsync.add_argument("--yes", action="store_true", help="no pide confirmación")
 
+    update = sub.add_parser("update", help="actualiza aw desde su repositorio y sincroniza los proyectos")
+    update.add_argument("--dry-run", action="store_true", help="muestra si hay novedades sin actualizar")
+
     doc = sub.add_parser("doctor", help="diagnóstico de proyectos")
     doc.add_argument("names", nargs="*")
     return parser
@@ -2379,6 +2456,8 @@ def dispatch(args):
         sync_projects(args.names or None, args.dry_run, args.workspace)
     elif args.cmd == "unsync":
         return unsync_project(args.name, args.dry_run, args.yes)
+    elif args.cmd == "update":
+        return update_aw(args.dry_run)
     elif args.cmd == "doctor":
         return doctor(args.names or None)
     return 0
