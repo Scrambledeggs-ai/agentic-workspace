@@ -59,6 +59,8 @@ agentic-workspace/
 └── Readme.md
 ```
 
+`templates/` es el contenido inicial de los archivos que define `structure.json`. El workspace que genera aw (`core/`, `memory/`, `projects/`, etc.) vive fuera del repositorio y no se publica.
+
 ## Arquitectura
 
 aw es un solo archivo, `generate.py`, que usa solo la biblioteca estándar de Python y `git`. Las mismas funciones
