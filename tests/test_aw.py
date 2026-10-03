@@ -764,11 +764,11 @@ class TestHooks(AwCase):
     def test_stop_avisa_una_sola_vez_si_hay_commits_sin_registro(self):
         project = self.new_project()
         self.git(project, "init", "-q")
-        self.git(project, "add", ".")
-        self.git(project, "commit", "-q", "-m", "c1")
         self.hook("session-start", self.payload(project), project)
         silent = self.hook("stop", self.payload(project), project)
         self.assertEqual(silent.stdout, "")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "c1")
         self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m c1"}), project)
         first = self.hook("stop", self.payload(project), project)
         message = json.loads(first.stdout)["systemMessage"]
@@ -779,9 +779,9 @@ class TestHooks(AwCase):
     def test_stop_no_avisa_si_se_registro_algo(self):
         project = self.new_project()
         self.git(project, "init", "-q")
+        self.hook("session-start", self.payload(project), project)
         self.git(project, "add", ".")
         self.git(project, "commit", "-q", "-m", "c1")
-        self.hook("session-start", self.payload(project), project)
         self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m c1"}), project)
         self.aw("decide", "Algo", "--why", "porque", cwd=project)
         self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
@@ -810,9 +810,9 @@ class TestHooks(AwCase):
     def test_session_start_de_una_sesion_nueva_descarta_lo_que_dejo_otra_sin_cierre(self):
         project = self.new_project()
         self.git(project, "init", "-q")
+        self.hook("session-start", {"cwd": project}, project)
         self.git(project, "add", ".")
         self.git(project, "commit", "-q", "-m", "c1")
-        self.hook("session-start", {"cwd": project}, project)
         self.hook("post-tool", {"cwd": project, "tool_name": "Bash", "tool_input": {"command": "git commit -m c1"}}, project)
         # Esa sesión termina sin SessionEnd; llega una nueva, también sin session_id.
         self.hook("session-start", {"cwd": project, "source": "startup"}, project)
