@@ -91,26 +91,9 @@ AUTO_END = "<!-- aw:auto:fin -->"
 PRIO_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 TASK_RE = re.compile(r"^- \[( |x)\] (T-\d+) \[(P[0-3])\] (.*)$")
 DATE_SUFFIX_RE = re.compile(r"(\s*\((?:creada|iniciada|hecha) \d{4}-\d{2}-\d{2}\))+\s*$")
-# git commit al inicio de un comando: tras un separador o dentro de sh -c "...", con sudo, env o VAR=valor delante.
-GIT_COMMIT_RE = re.compile(
-    r"""(?:^|[;&|(\n]\s*|\b(?:ba|z|da)?sh\s+-[a-z]*c\s+["']\s*)"""
-    r"""(?:(?:sudo|env)\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"""
-    r"""git\s+(?:(?:-[cC]\s+\S+|--\S+)\s+)*commit(?=\s|$|["')])""")
-QUOTED_RE = re.compile(r""""(?:[^"\\]|\\.)*"|'[^']*'""")
-
-
-def is_git_commit(command):
-    # Con --dry-run no cuenta (no crea ningún commit). Solo se miran los argumentos de la misma línea que
-    # están fuera de comillas: un mensaje que menciona --dry-run, entre comillas o en un heredoc, es un commit real.
-    command = str(command or "")
-    for match in GIT_COMMIT_RE.finditer(command):
-        line = re.sub(r"\\[\"']", "", command[match.end():].split("\n", 1)[0])  # las comillas escapadas no abren ni cierran nada
-        line = QUOTED_RE.sub("Q", line)
-        line = re.split(r"[\"']", line, maxsplit=1)[0]  # una comilla sin cerrar abre un mensaje de varias líneas
-        arguments = re.split(r"[;&|]", line, maxsplit=1)[0]
-        if not re.search(r"(?:^|\s)--dry-run(?=\s|$|\))", arguments):
-            return True
-    return False
+# Entradas del reflog que crean un commit: commit (también amend e initial), merge, cherry-pick y revert. Un cambio de
+# rama, un reset, un rebase o un avance directo (Fast-forward) no crean commits propios y no cuentan.
+COMMIT_REFLOG_RE = re.compile(r"(?:commit|merge|cherry-pick|revert)\b(?!.*\bFast-forward\b)")
 
 
 HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
@@ -183,10 +166,18 @@ def write_text(path, text):
 
 
 def append_text(path, text):
+    # Solo mira el último byte: el registro y los errores crecen y no hace falta releerlos en cada escritura.
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    existing = read_text(path)
+    needs_newline = False
+    try:
+        with open(path, "rb") as f:
+            if f.seek(0, os.SEEK_END):
+                f.seek(-1, os.SEEK_END)
+                needs_newline = f.read(1) != b"\n"
+    except (FileNotFoundError, IsADirectoryError):
+        pass
     with open(path, "a", encoding="utf-8") as f:
-        if existing and not existing.endswith("\n"):
+        if needs_newline:
             f.write("\n")
         f.write(text)
 
@@ -419,7 +410,8 @@ def registry_menu(label, folder):
 
 # Carpetas que dejan las herramientas de desarrollo: no son proyectos ni se recorren dentro de uno.
 HEAVY_DIRS = {"node_modules", "__pycache__", "venv"}
-# Carpetas de projects/ que nunca son un proyecto; check_project_name rechaza esos nombres.
+# Carpetas de projects/ que nunca son un proyecto. check_project_name rechaza las pesadas; check_project_names,
+# además, la plantilla.
 NOT_PROJECTS = {"template_project"} | HEAVY_DIRS
 
 
@@ -671,7 +663,10 @@ SENSITIVE_WORD = (r"(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key
 SENSITIVE_KEY = r"[\w.-]{0,64}" + SENSITIVE_WORD + r"[\w.-]{0,64}"
 AUTH_SCHEME = r"(?:bearer|basic|token|digest|negotiate|api-?key)"
 REDACT_LIMIT = 2000  # caracteres que los hooks pasan a redact como máximo
-SECRET_VALUE = r"(?!\[oculto\])(?:\"[^\"]*\"|'[^']*'|\S+)"
+# Entre comillas dobles se admiten comillas escapadas (\"), y también un valor entero entre
+# comillas escapadas (\"con espacios\"), como queda dentro de otro texto entre comillas.
+QUOTED_VALUE = r"""(?:"(?:[^"\\]|\\.)*"|\\"(?:[^\\"]|\\[^"])*\\"|'[^']*')"""
+SECRET_VALUE = r"(?!\[oculto\])(?:" + QUOTED_VALUE + r"|\S+)"
 OPTION_RE = re.compile(r"(?i)(?<![\w-])(--?[\w-]*" + SENSITIVE_WORD + r"[\w-]*)\s+(?!-)" + SECRET_VALUE)
 OPTION_NOT_SECRET_RE = re.compile(r"-(?:prompt|limit|count|length|size|type|stdin|ttl)$", re.I)
 LONG_STRING_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])")
@@ -691,12 +686,13 @@ def mask_option(match):
 
 
 def redact(text):
-    text = re.sub(r"(?i)\b(authorization)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|(?:" + AUTH_SCHEME + r"\s+)?\S+)",
+    text = re.sub(r"(?i)\b(authorization)\\?[\"']?\s*[:=]\s*(?:" + QUOTED_VALUE + r"|(?:" + AUTH_SCHEME + r"\s+)?\S+)",
                   r"\1 [oculto]", text)
     text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [oculto]", text)
-    text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", r"\1[oculto]@", text)
+    # La contraseña puede llevar / o @: se oculta hasta el último @ de la URL, aunque a veces tape de más.
+    text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:\S*@", r"\1[oculto]@", text)
     text = re.sub(r"(?i)([?&](?:" + SENSITIVE_KEY + r"|key|sig|signature))=[^&\s#]+", r"\1=[oculto]", text)
-    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")[\"']?\s*[=:]\s*" + SECRET_VALUE, r"\1 [oculto]", text)
+    text = re.sub(r"(?i)\b(" + SENSITIVE_KEY + r")\\?[\"']?\s*[=:]\s*" + SECRET_VALUE, r"\1 [oculto]", text)
     # Opciones de línea de comandos con el valor separado por un espacio.
     text = OPTION_RE.sub(mask_option, text)
     text = re.sub(r"\b(?:sk|pk|ghp|gho|xox[bpas])[-_][A-Za-z0-9_-]{16,}\b", "[oculto]", text)
@@ -1104,7 +1100,8 @@ def hook_session_start(payload, project):
     # Solo al reanudar o compactar se conserva el estado de la sesión; en cualquier otro caso es una sesión nueva
     # y se descarta lo que haya dejado una anterior que terminó sin SessionEnd.
     if not (payload.get("source") in ("resume", "compact") and load_session(key)):
-        session_write(session_path(key, "json"), json.dumps({"hashes": watched_hashes(project), "reminded": False, "inicio": now_str()}))
+        session_write(session_path(key, "json"), json.dumps({"hashes": watched_hashes(project), "reminded": False,
+                                                             "inicio": now_str(), "inicio_ts": int(time.time())}))
         try:
             os.remove(session_path(key, "events"))
         except OSError:
@@ -1115,23 +1112,57 @@ def hook_session_start(payload, project):
     print(json.dumps(output, ensure_ascii=False))
 
 
-def git_last_commit(cwd):
-    try:
-        result = subprocess.run(["git", "log", "-1", "--format=%h %s"], cwd=cwd, capture_output=True, text=True, timeout=5)
-    except Exception:
-        return None
-    return redact(result.stdout.strip()[:REDACT_LIMIT]) if result.returncode == 0 and result.stdout.strip() else None
+SESSION_FALLBACK_WINDOW = 600  # segundos hacia atrás que se miran si la sesión no pasó por SessionStart
+
+
+def new_commits(cwd, since, seen):
+    # Los commits que HEAD ganó desde `since` (segundos) según el reflog del repositorio de `cwd`, del más antiguo al
+    # más reciente, sin los que ya están en `seen`. No interpreta el comando: así cuenta igual un `git commit`, un
+    # alias, un merge o un cherry-pick, y no cuenta un `--dry-run`, un `--help` o un commit que falló.
+    top = run_git(cwd, "rev-parse", "--show-toplevel")
+    if not top or top.returncode != 0 or not top.stdout.strip():
+        return []
+    result = run_git(cwd, "log", "-g", "-n", "30", "--date=unix", "--format=%gd%x1f%gs%x1f%h %s")
+    found = []
+    for line in (result.stdout.splitlines() if result and result.returncode == 0 else []):
+        parts = line.split("\x1f", 2)
+        stamp = re.search(r"\{(\d+)\}$", parts[0])
+        if len(parts) < 3 or not stamp:
+            continue
+        if int(stamp.group(1)) < since:
+            break  # el reflog va del más reciente al más antiguo
+        key = f"{top.stdout.strip()}:{stamp.group(1)}:{parts[2].split(' ', 1)[0]}"
+        if COMMIT_REFLOG_RE.match(parts[1]) and key not in seen:
+            found.append((key, parts[2]))
+    return found[::-1]
 
 
 def hook_post_tool(payload, project):
     tool = str(payload.get("tool_name") or "?")
-    events = session_path(session_key(payload, project), "events")
+    key = session_key(payload, project)
+    events = session_path(key, "events")
     session_append(events, f"T {tool}\n")
-    if tool == "Bash":
-        command = str((payload.get("tool_input") or {}).get("command") or "")
-        if is_git_commit(command):
-            log_event(project, "commit", git_last_commit(payload.get("cwd") or project) or "(sin detalle)")
-            session_append(events, "C\n")
+    command = str((payload.get("tool_input") or {}).get("command") or "") if tool == "Bash" else ""
+    if not re.search(r"\bgit\b", command):
+        return  # sin git en el comando no se consulta el repositorio: el hook corre tras cada herramienta
+    session = load_session(key)
+    since = session.get("inicio_ts")
+    started = isinstance(since, int)
+    if not started:
+        since = session["inicio_ts"] = int(time.time()) - SESSION_FALLBACK_WINDOW
+    seen = as_list(session.get("commits_vistos"))
+    cwd = payload.get("cwd") or project
+    found = new_commits(cwd, since, seen)
+    if os.path.realpath(cwd) != os.path.realpath(project):
+        found += new_commits(project, since, seen + [k for k, _ in found])
+    if not found and started:
+        return
+    for commit_key, summary in found:
+        log_event(project, "commit", redact(summary[:REDACT_LIMIT]))
+        session_append(events, "C\n")
+        seen.append(commit_key)
+    session["commits_vistos"] = seen[-200:]
+    session_write(session_path(key, "json"), json.dumps(session))
 
 
 def hook_tool_failure(payload, project):
@@ -1179,7 +1210,7 @@ def append_month_log(project, text):
         if header and header.group(1) != month:
             dest = os.path.join(logs, f"{header.group(1)}.md")
             if os.path.exists(dest):
-                append_text(dest, existing)
+                append_text(dest, re.sub(r"\A# Registro de \d{4}-\d{2}[^\n]*\n\n?", "", existing))  # sin repetir la cabecera
                 write_text(path, "")
             else:
                 os.replace(path, dest)
@@ -2187,6 +2218,15 @@ def doctor(names=None):
 
 # -- Instalación del comando en el sistema --
 
+def is_aw_wrapper(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    return head.startswith(b"#!/bin/sh\nexec python3 ") and b'generate.py" "$@"' in head
+
+
 def action_install_command():
     if sys.platform.startswith("win"):
         print("El instalador todavía no soporta Windows. Por ahora usa 'python3 generate.py' directamente.")
@@ -2195,6 +2235,11 @@ def action_install_command():
     os.makedirs(bin_dir, exist_ok=True)
     wrapper_path = os.path.join(bin_dir, WRAPPER_NAME)
     script_path = os.path.abspath(__file__)
+    if os.path.lexists(wrapper_path) and not is_aw_wrapper(wrapper_path):
+        answer = input(f"Ya existe {wrapper_path} y no es el comando de aw. ¿Reemplazarlo? (s/n): ").strip().lower()
+        if answer != "s":
+            print("No se instaló: el archivo que ya estaba queda como estaba.")
+            return
     # write_text reemplaza el archivo: si en ese lugar hay un enlace simbólico, no escribe a través de él.
     write_text(wrapper_path, f'#!/bin/sh\nexec python3 {sh_quote(script_path)} "$@"\n')
     st = os.stat(wrapper_path)
