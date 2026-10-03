@@ -2,9 +2,12 @@
 
 Los cambios de cada versión, del más reciente al más antiguo. Las versiones siguen el formato mayor.menor.parche.
 
-## [1.0.0] — 2026-10-02
+## [2.0.0] — 2026-10-02
 
-Primera versión con número. Reúne lo publicado hasta ahora y los cambios del prelanzamiento.
+Primera versión con etiqueta. La versión que estaba publicada antes en GitHub no tenía número; se considera la
+1.0.0. Es un cambio de versión mayor porque modifica el comportamiento en proyectos que ya existen: cómo se
+detectan los commits, qué archivos de la plantilla se leen y qué lleva el `CLAUDE.md` de cada proyecto. Después de
+actualizar, ejecuta `aw sync` para llevar los cambios a tus proyectos.
 
 ### Añadido
 - `aw project import RUTA`: mueve una carpeta a `projects/`, la sincroniza y muestra el diagnóstico.
@@ -30,3 +33,8 @@ Primera versión con número. Reúne lo publicado hasta ahora y los cambios del 
 - Al archivar un mes que ya tenía archivo, no se repite la cabecera.
 - El menú sale sin traza con Ctrl-C, Ctrl-D o sin terminal.
 - `doctor` reconoce agentes y skills asignados con ruta desde la raíz o entre comillas invertidas.
+
+## [1.0.0] — 2026-10-02
+
+Publicada sin etiqueta (commit `ef6a9e5`). El sistema base: menú, proyectos desde una plantilla, tareas,
+decisiones y registro con comandos de formato fijo, seis hooks de Claude Code, `aw sync` y `aw doctor`.

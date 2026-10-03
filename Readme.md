@@ -237,7 +237,7 @@ Cada prueba usa un workspace temporal (`AW_HOME`), así que no toca el workspace
 
 ## Documentación
 
-Manual de uso: [Manual de Agentic Workspace 1.0](https://claude.ai/artifact/NJJk1s6GcNVvkWsw6UKtrb). Incluye la migración de proyectos existentes, cómo deshacerla y cómo actualizar aw.
+Manual de uso: [Manual de Agentic Workspace 2.0](https://claude.ai/artifact/NJJk1s6GcNVvkWsw6UKtrb). Incluye la migración de proyectos existentes, cómo deshacerla y cómo actualizar aw.
 
 ---
 
