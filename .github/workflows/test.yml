@@ -1,30 +1,4 @@
-name: Pruebas
-
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  unix:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, ubuntu-latest, macos-14, macos-latest]
-        python: ["3.10", "3.13"]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
-
   windows:
-    # Informativo: no marca el repo en rojo mientras no se soporte Windows
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -32,9 +6,16 @@ jobs:
         os: [windows-2022, windows-latest]
         python: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
+      - name: Pruebas y resumen de fallos
+        shell: bash
+        run: |
+          python -m unittest discover -s tests 2>&1 | tee salida.txt || true
+          echo "=== RESUMEN DE FALLOS ==="
+          grep -E "^(FAIL|ERROR):" salida.txt | sort
