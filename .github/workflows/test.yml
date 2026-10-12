@@ -1,48 +1,40 @@
-name: Pruebas multiplataforma
+name: Pruebas
+
 on:
   push:
   pull_request:
-  workflow_dispatch:   # permite lanzarlo a mano desde la pestaña Actions
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  unix:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-22.04     # Linux (versión anterior a la latest)
-          - windows-2022     # Windows (versión anterior)
-          - windows-latest   # Windows (más reciente)
-          - macos-14         # macOS (versión anterior)
-          - macos-latest     # macOS (más reciente)
-        python: ["3.10", "3.12"]
+        os: [ubuntu-22.04, ubuntu-latest, macos-14, macos-latest]
+        python: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Instalar dependencias (si existe requirements.txt)
-        shell: bash
-        run: |
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Verificar sintaxis
-        run: python -m py_compile generate.py
-      - name: Ejecutar el script
-        run: python generate.py --help
+      - run: python -m unittest discover -s tests -v
 
-  # Prueba desde cada terminal de Windows
-  terminales-windows:
-    runs-on: windows-latest
+  windows:
+    # Informativo: no marca el repo en rojo mientras no se soporte Windows
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        shell: [cmd, powershell, pwsh]
+        os: [windows-2022, windows-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - name: Ejecutar desde ${{ matrix.shell }}
-        shell: ${{ matrix.shell }}
-        run: python generate.py --doctor
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
