@@ -1,0 +1,48 @@
+name: Pruebas multiplataforma
+on:
+  push:
+  pull_request:
+  workflow_dispatch:   # permite lanzarlo a mano desde la pestaña Actions
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04     # Linux (versión anterior a la latest)
+          - windows-2022     # Windows (versión anterior)
+          - windows-latest   # Windows (más reciente)
+          - macos-14         # macOS (versión anterior)
+          - macos-latest     # macOS (más reciente)
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Instalar dependencias (si existe requirements.txt)
+        shell: bash
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Verificar sintaxis
+        run: python -m py_compile generate.py
+      - name: Ejecutar el script
+        run: python generate.py --help
+
+  # Prueba desde cada terminal de Windows
+  terminales-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [cmd, powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ejecutar desde ${{ matrix.shell }}
+        shell: ${{ matrix.shell }}
+        run: python generate.py --doctor
