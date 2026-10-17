@@ -3113,5 +3113,92 @@ class TestFunciones(AwCase):
         self.assertEqual(self.aw_mod.render("@@DESCONOCIDA@@", {}), "@@DESCONOCIDA@@")
 
 
+class TestReporte(AwCase):
+    def report_path(self, project):
+        return os.path.join(project, "artifacts", f"reporte-{time.strftime('%Y-%m-%d')}.html")
+
+    def test_report_dentro_del_proyecto_genera_el_html_en_artifacts(self):
+        project = self.new_project()
+        self.aw("task", "add", "Diseñar <script>alert(1)</script>", "--prio", "P1", cwd=project)
+        self.aw("task", "add", "Otra", cwd=project)
+        self.aw("task", "start", "T-002", cwd=project)
+        self.aw("decide", "Usar SQLite", "--why", "es suficiente", "--alt", "Postgres", cwd=project)
+        result = self.aw("report", cwd=project)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(self.report_path(project), result.stdout)
+        page = slurp(self.report_path(project))
+        self.assertTrue(page.startswith("<!doctype html>"))
+        self.assertIn("<h1>demo</h1>", page)
+        self.assertIn("Proyecto de prueba", page)
+        self.assertIn("Usar SQLite", page)
+        self.assertIn("Alternativas descartadas: Postgres", page)
+        self.assertIn("&lt;script&gt;", page)  # el texto del usuario se escapa
+        self.assertNotIn("<script>", page)
+        self.assertIn("por completar", page)  # campos de project.md sin rellenar
+        self.assertIn("project.md:", page)  # lista de campos por completar por archivo
+
+    def test_report_del_mismo_dia_reemplaza_el_anterior(self):
+        project = self.new_project()
+        self.aw("report", cwd=project)
+        self.aw("task", "add", "Nueva tarea", cwd=project)
+        self.aw("report", cwd=project)
+        reports = [f for f in os.listdir(os.path.join(project, "artifacts")) if f.startswith("reporte-")]
+        self.assertEqual(reports, [os.path.basename(self.report_path(project))])
+        self.assertIn("Nueva tarea", slurp(self.report_path(project)))
+
+    def test_report_fuera_de_un_proyecto_sin_nombre_no_genera_nada(self):
+        project = self.new_project()
+        self.aw("project", "new", "otro")
+        result = self.aw("report", cwd=self.tmp)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("aw report --todos", result.stdout + result.stderr)
+        for name in ("demo", "otro"):
+            self.assertFalse(os.path.exists(self.report_path(self.project(name))))
+
+    def test_report_con_nombre_solo_genera_ese_proyecto(self):
+        project = self.new_project()
+        self.aw("project", "new", "otro")
+        result = self.aw("report", "otro", cwd=project)  # el nombre manda, aunque se esté en otro proyecto
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(os.path.exists(self.report_path(self.project("otro"))))
+        self.assertFalse(os.path.exists(self.report_path(project)))
+
+    def test_report_todos_genera_uno_por_proyecto_y_omite_carpetas_que_no_son_proyectos(self):
+        self.new_project()
+        self.aw("project", "new", "otro")
+        loose = os.path.join(self.ws, "projects", "suelta")
+        os.makedirs(loose)
+        result = self.aw("report", "--todos", cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ("demo", "otro"):
+            self.assertTrue(os.path.exists(self.report_path(self.project(name))), name)
+        self.assertEqual(os.listdir(loose), [])
+
+    def test_report_no_acepta_nombre_y_todos_a_la_vez(self):
+        self.new_project()
+        result = self.aw("report", "demo", "--todos", cwd=self.tmp)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(os.path.exists(self.report_path(self.project())))
+
+    def test_report_lista_entregables_sin_los_reportes(self):
+        project = self.new_project()
+        self.write(os.path.join(project, "artifacts", "propuesta.pdf"), "x")
+        self.write(os.path.join(project, "artifacts", "reporte-2026-01-01.html"), "viejo")
+        self.aw("report", cwd=project)
+        page = slurp(self.report_path(project))
+        self.assertIn("artifacts/propuesta.pdf", page)
+        self.assertNotIn("artifacts/reporte-", page)
+
+    def test_report_ordena_las_ultimas_hechas_por_numero(self):
+        project = self.new_project()
+        self.aw("task", "add", "baja", "--prio", "P3", cwd=project)
+        self.aw("task", "add", "alta", "--prio", "P0", cwd=project)
+        self.aw("task", "done", "T-002", cwd=project)
+        self.aw("task", "done", "T-001", cwd=project)
+        self.aw("report", cwd=project)
+        page = slurp(self.report_path(project))
+        self.assertLess(page.index("T-002 alta"), page.index("T-001 baja"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ import contextlib
 import datetime
 import errno
 import hashlib
+import html
 import json
 import os
 import re
@@ -992,10 +993,9 @@ def refresh_workspace_index():
         replace_block(os.path.join(ROOT, "memory", "projects", "project_index.md"), "\n".join(rows), header=INDEX_HEADER)
 
 
-def refresh_artifact_indexes(project):
+def artifact_files(project):
+    # Lo producido en artifacts/, como rutas relativas a esa carpeta, sin los índices ni los archivos ocultos.
     base = pj(project, "artifacts")
-    if not os.path.isdir(base):
-        return
     found = []
     for dirpath, dirs, files in os.walk(base):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
@@ -1004,6 +1004,14 @@ def refresh_artifact_indexes(project):
             if fname.startswith(".") or rel in ARTIFACT_INDEX_FILES:
                 continue
             found.append(rel)
+    return found
+
+
+def refresh_artifact_indexes(project):
+    base = pj(project, "artifacts")
+    if not os.path.isdir(base):
+        return
+    found = artifact_files(project)
     assets = sorted(f for f in found if os.path.splitext(f)[1].lower() in ASSET_EXT)
     outputs = sorted(f for f in found if os.path.splitext(f)[1].lower() not in ASSET_EXT)
     replace_auto_block(pj(base, "outputs.md"), outputs, "artifacts")
@@ -2049,6 +2057,23 @@ def doctor_git(project):
     return results
 
 
+FILLABLE_TOP = ("project.md", "CLAUDE.md", "agents", "skills", "tools", "sop")  # lo que se completa a mano
+
+
+def completar_counts(project):
+    # Campos '(completar)' que quedan, por archivo (ruta relativa), en lo que se completa a mano.
+    counts = {}
+    for dirpath, dirs, files in os.walk(project):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in HEAVY_DIRS)
+        for fname in sorted(files):
+            rel = os.path.relpath(os.path.join(dirpath, fname), project).replace(os.sep, "/")
+            if rel.endswith(".md") and rel.split("/")[0] in FILLABLE_TOP:
+                count = read_text(os.path.join(dirpath, fname)).count("(completar)")
+                if count:
+                    counts[rel] = count
+    return counts
+
+
 def doctor_project(project):
     results = []
 
@@ -2074,7 +2099,7 @@ def doctor_project(project):
     else:
         add("warn", "no existe template_project en el workspace")
 
-    empty, fields = [], 0
+    empty = []
     for dirpath, dirs, files in os.walk(project):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in HEAVY_DIRS]
         for fname in files:
@@ -2084,11 +2109,9 @@ def doctor_project(project):
                 size = os.path.getsize(full)
             except OSError:
                 continue  # enlace simbólico roto o archivo que desapareció
-            if size == 0:
-                if rel in fillable:
-                    empty.append(rel)
-            elif rel.endswith(".md") and rel.split("/")[0] in ("project.md", "CLAUDE.md", "agents", "skills", "tools", "sop"):
-                fields += read_text(full).count("(completar)")
+            if size == 0 and rel in fillable:
+                empty.append(rel)
+    fields = sum(completar_counts(project).values())
     if empty:
         add("warn", f"{len(empty)} archivo(s) vacío(s) (aw sync los rellena): " + ", ".join(sorted(empty)[:4]) + ("…" if len(empty) > 4 else ""))
     else:
@@ -2254,6 +2277,240 @@ def doctor(names=None):
             print(f"  {symbols[level]} " + text.replace("\n", "\n    "))
     print(f"\nResumen: {counts['ok']} bien, {counts['warn']} por revisar, {counts['bad']} pendientes")
     return 1 if counts["bad"] else 0
+
+
+# -- Reporte del proyecto --
+
+REPORT_DAYS = 30  # días hacia atrás que cubre la actividad del reporte
+REPORT_FILE_RE = re.compile(r"(?:^|/)reporte-\d{4}-\d{2}-\d{2}\.html$")
+LOG_LINE_RE = re.compile(r"- (\d{4}-\d{2}-\d{2})(?: (\d{2}:\d{2}))? \[([^\]]+)\] ?(.*)$")
+REPORT_CSS = """
+:root { --bg:#f7f7f5; --card:#ffffff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e3de; --accent:#2f6f5e;
+        --warn:#9a6700; --warn-bg:#fff4d6; --bad:#b42318; --bad-bg:#fde8e6; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#161615; --card:#1f1f1d; --text:#ecece8; --muted:#a3a39c; --line:#33332f; --accent:#7cc4ad;
+          --warn:#f2c14e; --warn-bg:#3a2f12; --bad:#ff8a80; --bad-bg:#3d1b18; }
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width:1040px; margin:0 auto; padding:32px 16px 48px; }
+h1 { margin:0 0 4px; font-size:28px; }
+h2 { font-size:17px; margin:0 0 12px; }
+h3 { font-size:14px; margin:0 0 8px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+p { margin:0 0 8px; }
+.meta, .muted { color:var(--muted); font-size:13px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; margin:24px 0; }
+.card, section { background:var(--card); border:1px solid var(--line); border-radius:10px; }
+.card { padding:14px 16px; }
+.card b { display:block; font-size:24px; color:var(--accent); }
+.card span { color:var(--muted); font-size:13px; }
+section { padding:20px; margin-bottom:16px; }
+.cols { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:20px; }
+ul { margin:0; padding-left:18px; }
+li { margin:3px 0; }
+table { width:100%; border-collapse:collapse; font-size:14px; }
+th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+dl { display:grid; grid-template-columns:minmax(120px, max-content) 1fr; gap:6px 16px; margin:0; }
+dt { color:var(--muted); }
+dd { margin:0; }
+.tag { display:inline-block; font-size:12px; padding:0 6px; border-radius:6px; border:1px solid var(--line); color:var(--muted); }
+.pending { color:var(--warn); background:var(--warn-bg); padding:0 6px; border-radius:6px; }
+.bad { color:var(--bad); background:var(--bad-bg); padding:0 6px; border-radius:6px; }
+.decision { padding:10px 0; border-bottom:1px solid var(--line); }
+.decision:last-child { border-bottom:0; }
+.table-wrap { overflow-x:auto; }
+"""
+
+
+def report_since(days=REPORT_DAYS):
+    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+
+
+def project_identity(project):
+    # Descripción (primer párrafo bajo el título) y campos «- Clave: valor» de project.md.
+    description, fields = "", []
+    for line in read_text(pj(project, "project.md")).splitlines()[1:]:
+        if line.startswith("#") and description:
+            break
+        if not description and line.strip() and not line.startswith(("#", "-", "<!--")):
+            description = line.strip()
+        match = re.match(r"- ([^:]+):\s*(.*)$", line)
+        if match:
+            fields.append((match.group(1).strip(), match.group(2).strip()))
+    return description, fields
+
+
+def decision_blocks(project):
+    blocks = []
+    for chunk in re.split(r"^## ", read_text(pj(project, "execution", "decisions.md")), flags=re.M)[1:]:
+        lines = chunk.splitlines()
+        item = {"title": lines[0].strip(), "why": "", "alt": ""}
+        for line in lines[1:]:
+            if line.startswith("- Motivo:"):
+                item["why"] = line[len("- Motivo:"):].strip()
+            elif line.startswith("- Alternativas:"):
+                item["alt"] = line[len("- Alternativas:"):].strip()
+        blocks.append(item)
+    return blocks
+
+
+def tool_totals(project, since):
+    # Suma de usos por herramienta en las sesiones desde `since`; cada sesión guarda solo sus 8 más usadas.
+    totals = {}
+    for line in read_text(pj(project, "tools", "tool_usage.md")).splitlines():
+        parts = [part.strip() for part in line[2:].split("|")] if line.startswith("- ") else []
+        if len(parts) < 3 or parts[0] < since:
+            continue
+        for item in parts[2].split(","):
+            name, _sep, count = item.strip().rpartition("×")
+            if name and count.isdigit():
+                totals[name] = totals.get(name, 0) + int(count)
+    return sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+
+
+def dated_lines(path, since):
+    return [line for line in read_text(path).splitlines()
+            if (match := LOG_LINE_RE.match(line)) and match.group(1) >= since]
+
+
+def report_html(project):
+    e = html.escape
+    name = os.path.basename(project)
+    since = report_since()
+    active, backlog, done = (load_tasks(project, f) for f in ("active.md", "backlog.md", "done.md"))
+    decisions = decision_blocks(project)
+    entries = log_entries(project)
+    recent_entries = [line for line in entries if (m := LOG_LINE_RE.match(line)) and m.group(1) >= since]
+    commits = [line for line in recent_entries if "[commit]" in line]
+    sessions = [line for line in recent_entries if "[sesión] terminada" in line]
+    errors = dated_lines(pj(project, "execution", "errors.md"), since)
+    activity = activity_entries(project)
+    last = LOG_LINE_RE.match(entries[-1]) if entries else None
+    description, fields = project_identity(project)
+
+    def value(text):
+        return f'<span class="pending">por completar</span>' if not text or "(completar)" in text else e(text)
+
+    def task_list(tasks, empty="(ninguna)", limit=None):
+        shown = tasks[-limit:][::-1] if limit else tasks
+        items = "".join(f'<li><span class="tag">{e(t["prio"])}</span> {e(t["id"])} {e(clean_title(t["title"]))}</li>' for t in shown)
+        more = f'<p class="muted">y {len(tasks) - len(shown)} más</p>' if len(tasks) > len(shown) else ""
+        return f"<ul>{items}</ul>{more}" if items else f'<p class="muted">{empty}</p>'
+
+    def log_list(lines, empty):
+        items = []
+        for line in lines:
+            match = LOG_LINE_RE.match(line)
+            if match:
+                when = match.group(1) + (" " + match.group(2) if match.group(2) else "")
+                items.append(f'<li><span class="muted">{e(when)}</span> <span class="tag">{e(match.group(3))}</span> {e(match.group(4))}</li>')
+        return f"<ul>{''.join(items)}</ul>" if items else f'<p class="muted">{empty}</p>'
+
+    def table(headers, rows, empty):
+        if not rows:
+            return f'<p class="muted">{empty}</p>'
+        head = "".join(f"<th>{e(h)}</th>" for h in headers)
+        body = "".join("<tr>" + "".join(f"<td>{e(c)}</td>" for c in row) + "</tr>" for row in rows)
+        return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+
+    def assigned(rel, width):
+        rows = [(cells + [""] * width)[:width] for cells in markdown_rows(read_text(pj(project, *rel.split("/"))))
+                if cells and cells[0] and cells[0] != "(completar)"]
+        return rows
+
+    cards = [(len(active), "en curso"), (len(backlog), "pendientes"), (len(done), "hechas"), (len(decisions), "decisiones"),
+             (len(commits), f"commits ({REPORT_DAYS} días)"), (len(sessions), f"sesiones ({REPORT_DAYS} días)"),
+             (len(errors), f"errores ({REPORT_DAYS} días)")]
+    parts = [f"<header><h1>{e(name)}</h1>"]
+    if description and description != "(completar)":
+        parts.append(f"<p>{e(description)}</p>")
+    parts.append(f'<p class="meta">Reporte generado el {e(now_str())} · actividad de los últimos {REPORT_DAYS} días'
+                 f' · última actividad registrada: {e(last.group(1)) if last else "ninguna"}</p></header>')
+    parts.append('<div class="cards">' + "".join(f"<div class=\"card\"><b>{n}</b><span>{e(label)}</span></div>" for n, label in cards) + "</div>")
+
+    identity = "".join(f"<dt>{e(k)}</dt><dd>{value(v)}</dd>" for k, v in fields)
+    identity = f"<dl>{identity}</dl>" if identity else '<p class="muted">project.md no tiene campos.</p>'
+    parts.append(f"<section><h2>Identidad</h2>{identity}</section>")
+
+    parts.append('<section><h2>Tareas</h2><div class="cols">'
+                 f"<div><h3>En curso</h3>{task_list(active)}</div>"
+                 f"<div><h3>Pendientes</h3>{task_list(backlog)}</div>"
+                 f"<div><h3>Últimas hechas</h3>{task_list(sorted(done, key=lambda t: int(t['id'][2:])), limit=10)}</div></div></section>")
+
+    if decisions:
+        items = []
+        for d in decisions[::-1][:8]:
+            extra = f'<p class="muted">Alternativas descartadas: {e(d["alt"])}</p>' if d["alt"] else ""
+            items.append(f'<div class="decision"><b>{e(d["title"])}</b><p>{e(d["why"])}</p>{extra}</div>')
+        more = f'<p class="muted">y {len(decisions) - 8} anteriores en execution/decisions.md</p>' if len(decisions) > 8 else ""
+        parts.append(f"<section><h2>Decisiones recientes</h2>{''.join(items)}{more}</section>")
+    else:
+        parts.append('<section><h2>Decisiones recientes</h2><p class="muted">Todavía no hay decisiones registradas.</p></section>')
+
+    parts.append(f"<section><h2>Actividad reciente</h2>{log_list(activity[::-1][:15], 'Sin actividad registrada.')}</section>")
+
+    tools = tool_totals(project, since)[:10]
+    parts.append('<section><div class="cols">'
+                 f"<div><h2>Herramientas más usadas ({REPORT_DAYS} días)</h2>{table(['Herramienta', 'Usos'], [(t, str(n)) for t, n in tools], 'Sin sesiones registradas en el período.')}</div>"
+                 f"<div><h2>Últimos errores</h2>{log_list(errors[::-1][:5], 'Sin errores en el período.')}</div></div></section>")
+
+    outputs = [f for f in artifact_files(project) if not REPORT_FILE_RE.search(f)]
+    listing = "".join(f"<li>artifacts/{e(f)}</li>" for f in outputs[:30])
+    more = f'<p class="muted">y {len(outputs) - 30} más</p>' if len(outputs) > 30 else ""
+    listing = f"<ul>{listing}</ul>{more}" if listing else '<p class="muted">Todavía no hay archivos en artifacts/.</p>'
+    parts.append(f"<section><h2>Entregables</h2>{listing}</section>")
+
+    parts.append('<section><h2>Agentes, skills y herramientas asignados</h2><div class="cols">'
+                 f"<div><h3>Agentes</h3>{table(['Tarea', 'Agente', 'Notas'], assigned('agents/assigned_agents.md', 3), 'Ninguno asignado.')}</div>"
+                 f"<div><h3>Skills</h3>{table(['Tarea', 'Skill', 'Notas'], assigned('skills/assigned_skills.md', 3), 'Ninguna asignada.')}</div>"
+                 f"<div><h3>Herramientas</h3>{table(['Herramienta', 'Para qué', 'Dónde'], assigned('tools/assigned_tools.md', 3), 'Ninguna asignada.')}</div>"
+                 "</div></section>")
+
+    checks = [(level, text) for level, text in doctor_project(project) if level != "ok"]
+    pending = completar_counts(project)
+    items = "".join(f'<li><span class="{"bad" if level == "bad" else "pending"}">{"pendiente" if level == "bad" else "revisar"}</span> '
+                    f"{e(text.splitlines()[0])}</li>" for level, text in checks)
+    fill = "".join(f"<li>{e(rel)}: {n} campo(s)</li>" for rel, n in pending.items())
+    body = (f"<ul>{items}</ul>" if items else '<p class="muted">El diagnóstico no encontró nada para revisar.</p>')
+    if fill:
+        body += f"<h3 style=\"margin-top:16px\">Campos por completar</h3><ul>{fill}</ul>"
+    parts.append(f"<section><h2>Por revisar (aw doctor)</h2>{body}</section>")
+
+    return ("<!doctype html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            f"<title>Reporte de {e(name)}</title>\n<style>{REPORT_CSS}</style>\n</head>\n<body>\n<main>\n"
+            + "\n".join(parts) + "\n</main>\n</body>\n</html>\n")
+
+
+def write_report(project):
+    path = pj(project, "artifacts", f"reporte-{today()}.html")
+    with project_lock(project):
+        write_text(path, report_html(project))
+    return path
+
+
+def report(name=None, everything=False):
+    if everything and name:
+        raise AwError("Indica un proyecto o --todos, no ambos.")
+    if everything:
+        names = [n for n in list_projects() if is_project_dir(os.path.join(ROOT, "projects", n))]
+    elif name:
+        names = [os.path.basename(resolve_project(name))]
+    elif find_project():
+        names = [os.path.basename(resolve_project())]
+    else:
+        raise AwError("No se está dentro de un proyecto aw. Indica cuál: aw report NOMBRE, "
+                      "o aw report --todos para generar uno por cada proyecto.")
+    failed = 0
+    for project_name in names:
+        try:
+            path = write_report(os.path.join(ROOT, "projects", project_name))
+            print(f"Reporte de {project_name}: {path}")
+        except (AwError, OSError) as exc:
+            failed += 1
+            print(f"{project_name}: no se pudo generar el reporte ({exc})")
+    return 1 if failed else 0
 
 
 # -- Instalación del comando en el sistema --
@@ -2480,6 +2737,10 @@ def build_parser():
 
     doc = sub.add_parser("doctor", help="diagnóstico de proyectos")
     doc.add_argument("names", nargs="*")
+
+    rep = sub.add_parser("report", help="genera un reporte HTML del proyecto en su carpeta artifacts/")
+    rep.add_argument("name", nargs="?", help="proyecto (por defecto, el de la carpeta actual)")
+    rep.add_argument("--todos", action="store_true", help="un reporte para cada proyecto")
     return parser
 
 
@@ -2545,6 +2806,8 @@ def dispatch(args):
         return update_aw(args.dry_run)
     elif args.cmd == "doctor":
         return doctor(args.names or None)
+    elif args.cmd == "report":
+        return report(args.name, args.todos)
     return 0
 
 
