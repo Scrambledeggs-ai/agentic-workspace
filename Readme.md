@@ -1,6 +1,54 @@
 # Agentic Workspace
 
-Proyecto de scripts en Python para creacion de entorno de carpetas para trabajar con agentes IA
+Workspace para trabajar con agentes de IA en Claude Code: cada proyecto guarda en archivos sus tareas, decisiones e
+historial, y los hooks los leen y escriben solos. Un solo archivo de Python, sin dependencias.
+
+*English: [README.en.md](README.en.md)*
+
+---
+
+## Arranque rápido
+
+```bash
+git clone https://github.com/Scrambledeggs-ai/agentic-workspace.git && cd agentic-workspace
+python3 generate.py init                       # crea el workspace
+python3 generate.py project new mi-proyecto    # crea un proyecto
+cd projects/mi-proyecto && claude              # abre Claude Code dentro del proyecto
+```
+
+Claude Code hay que abrirlo desde la carpeta del proyecto: los hooks de aw están en su `.claude/settings.json` y
+solo se cargan ahí. Con el comando `aw` instalado (ver [Instalar el comando `aw`](#instalar-el-comando-aw)),
+`python3 generate.py` se reemplaza por `aw`.
+
+### Lo que ve el modelo al abrir la sesión
+
+Al iniciar, un hook le entrega a Claude Code un resumen como este, armado con los archivos del proyecto:
+
+```text
+[aw] Proyecto mi-proyecto: contexto cargado al iniciar la sesión (protocolo en el CLAUDE.md del workspace).
+Estado: 1 en curso · 1 pendientes · 0 hechas · actualizado 2026-10-17
+
+## En curso
+- T-001 [P1] Formulario de contacto
+
+## Próximas (máx. 5)
+- T-002 [P2] Revisar textos legales
+
+## Última actividad
+- 2026-10-17 10:02 [tarea] T-001 iniciada: Formulario de contacto
+- 2026-10-17 10:15 [decisión] Formulario con envío por correo, sin base de datos
+- 2026-10-17 10:20 [nota] El cliente pidió entregar el viernes
+
+## Última decisión
+- 2026-10-17 — Formulario con envío por correo, sin base de datos
+
+## Registro reciente
+- 2026-10-17 09:58 [nota] proyecto creado
+- 2026-10-17 10:00 [tarea] T-001 creada [P1]: Formulario de contacto
+- 2026-10-17 10:01 [tarea] T-002 creada [P2]: Revisar textos legales
+```
+
+Así cada sesión empieza sabiendo qué está en curso, qué se decidió y por qué, sin releer el proyecto.
 
 ---
 
@@ -8,6 +56,7 @@ Proyecto de scripts en Python para creacion de entorno de carpetas para trabajar
 
 * Python 3.10 o superior (la integración continua lo prueba con 3.10 y 3.13, en Linux y macOS)
 * Git instalado
+* [Claude Code](https://claude.com/claude-code), para los hooks y el protocolo de cada proyecto
 
 Verificar instalación:
 
@@ -56,7 +105,8 @@ agentic-workspace/
 ├── CODE_OF_CONDUCT.md
 ├── SECURITY.md       cómo informar de una vulnerabilidad
 ├── LICENSE
-└── Readme.md
+├── Readme.md
+└── README.en.md      resumen en inglés
 ```
 
 `templates/` es el contenido inicial de los archivos que define `structure.json`. El workspace que genera aw (`core/`, `memory/`, `projects/`, etc.) vive fuera del repositorio y no se publica.
@@ -137,10 +187,10 @@ Este proyecto contiene un menú en Python para generar y manejar la estructura d
 
 Cada proyecto creado con aw lleva su estado en archivos, y Claude Code los usa así:
 
-* **Al abrir una sesión**, un hook (`SessionStart`) carga un resumen: estado, tareas en curso y últimas líneas del registro.
+* **Al abrir una sesión**, un hook (`SessionStart`) carga un resumen: estado, tareas en curso y la actividad reciente del registro (tareas, decisiones, commits y notas). Las aperturas, cierres y compactaciones de sesión quedan en el registro, pero no se muestran en el resumen ni en `state.md`, y ninguna línea aparece dos veces.
 * **Mientras se trabaja**, otros hooks anotan solos los commits, los fallos de herramientas (sin comandos completos ni secretos), las compactaciones y el resumen de cada sesión.
   Los commits se leen del historial de git (reflog), no del texto del comando: cuentan los commits, merges, cherry-picks y reverts hechos durante la sesión, y no un cambio de rama, un `reset` ni un `--dry-run`. Se consulta después de cada comando que menciona `git`.
-* **Lo que exige criterio** se registra con comandos de formato fijo (`aw task`, `aw decide`, `aw log`).
+* **Lo que exige criterio** se registra con comandos de formato fijo (`aw task`, `aw decide`, `aw log`). Cada tarea creada, iniciada o terminada y cada decisión deja además una línea en el registro.
 * **Al terminar un turno**, si en la sesión hubo commits y no se registró ninguna decisión ni se movió ninguna tarea, un hook (`Stop`) lo avisa una sola vez. El aviso se muestra a quien usa Claude Code, no al modelo: los hooks de aw nunca bloquean el cierre del turno, así que registrar o no queda a criterio de la persona.
 * **El estado** (`state.md`) se genera solo a partir de las tareas y el registro. El archivo generado lleva una línea de marca (`<!-- aw:auto — ... -->`): mientras esa línea esté, cualquier texto agregado a mano se pierde en la siguiente regeneración. Para llevar el estado a mano hay que quitar esa línea; desde entonces aw no lo sobrescribe.
 * **`core/` y `memory/`** se crean con un formato base para completar a mano (configuración, arranque, enrutamiento, política de memoria, memoria global). Los que solo remiten a otra fuente lo dicen en vez de duplicar contenido. `aw doctor` cuenta los campos `(completar)` que faltan.
@@ -240,39 +290,6 @@ Cada prueba usa un workspace temporal (`AW_HOME`), así que no toca el workspace
 ## Documentación
 
 Manual de uso: [Manual de Agentic Workspace 2.0](https://claude.ai/artifact/NJJk1s6GcNVvkWsw6UKtrb). Incluye la migración de proyectos existentes, cómo deshacerla y cómo actualizar aw.
-
----
-
-## Flujo básico de Git
-
-Guardar cambios:
-
-```bash
-git add .
-git commit -m "describe changes"
-```
-
-Subir cambios a GitHub:
-
-```bash
-git push
-```
-
-Actualizar el repositorio local (para actualizar aw instalado, usa `aw update`):
-
-```bash
-git pull
-```
-
----
-
-## Buenas prácticas
-
-* Mantener actualizado este README cuando cambie la funcionalidad del proyecto.
-* Utilizar mensajes de commit descriptivos.
-* No subir credenciales, tokens ni información sensible.
-* Mantener `.gitignore` actualizado para excluir archivos temporales y locales.
-* Realizar commits pequeños y frecuentes.
 
 ---
 
