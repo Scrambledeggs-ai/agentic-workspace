@@ -21,6 +21,13 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "@@AW_CMD@@ hook prompt", "timeout": 10 }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [

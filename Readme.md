@@ -124,7 +124,7 @@ sirven al menú, a los comandos y a los hooks de Claude Code.
   se toca nunca. Para cambiar lo que se crea se editan esos dos, no el código.
 * **Proyectos.** Cada proyecto es una carpeta de `projects/` con su estado en archivos: tareas, decisiones,
   registro de ejecución y errores. Se clona de `projects/template_project`.
-* **Hooks.** El `.claude/settings.json` de cada proyecto registra seis hooks que llaman a `aw hook <evento>`.
+* **Hooks.** El `.claude/settings.json` de cada proyecto registra siete hooks que llaman a `aw hook <evento>`.
   Son síncronos, nunca bloquean la sesión y guardan su estado temporal en archivos privados del directorio
   temporal.
 * **Sincronización y diagnóstico.** `aw sync` lleva lo nuevo de la plantilla a cada proyecto sin reemplazar
@@ -189,9 +189,9 @@ Cada proyecto creado con aw lleva su estado en archivos, y Claude Code los usa a
 
 * **Al abrir una sesión**, un hook (`SessionStart`) carga un resumen: estado, tareas en curso y la actividad reciente del registro (tareas, decisiones, commits y notas). Las aperturas, cierres y compactaciones de sesión quedan en el registro, pero no se muestran en el resumen ni en `state.md`, y ninguna línea aparece dos veces.
 * **Mientras se trabaja**, otros hooks anotan solos los commits, los fallos de herramientas (sin comandos completos ni secretos), las compactaciones y el resumen de cada sesión.
-  Los commits se leen del historial de git (reflog), no del texto del comando: cuentan los commits, merges, cherry-picks y reverts hechos durante la sesión, y no un cambio de rama, un `reset` ni un `--dry-run`. Se consulta después de cada comando que menciona `git`.
+  Los commits se leen del historial de git (reflog), no del texto del comando: cuentan los commits, merges, cherry-picks y reverts hechos durante la sesión, y no un cambio de rama, un `reset` ni un `--dry-run`. Se consulta después de cada comando que menciona `git`, al terminar cada turno y al cerrar la sesión, así que también cuentan los commits hechos desde otra terminal.
 * **Lo que exige criterio** se registra con comandos de formato fijo (`aw task`, `aw decide`, `aw log`). Cada tarea creada, iniciada o terminada y cada decisión deja además una línea en el registro.
-* **Al terminar un turno**, si en la sesión hubo commits y no se registró ninguna decisión ni se movió ninguna tarea, un hook (`Stop`) lo avisa una sola vez. El aviso se muestra a quien usa Claude Code, no al modelo: los hooks de aw nunca bloquean el cierre del turno, así que registrar o no queda a criterio de la persona.
+* **Al terminar un turno**, si en la sesión hubo commits y no se registró ninguna decisión ni se movió ninguna tarea, un hook (`Stop`) lo avisa una sola vez a quien usa Claude Code. Al modelo le llega con el siguiente mensaje (hook `UserPromptSubmit`), salvo que entre medio ya se haya registrado algo. Ningún hook bloquea el cierre del turno: registrar o no queda a criterio de la persona y del modelo.
 * **El estado** (`state.md`) se genera solo a partir de las tareas y el registro. El archivo generado lleva una línea de marca (`<!-- aw:auto — ... -->`): mientras esa línea esté, cualquier texto agregado a mano se pierde en la siguiente regeneración. Para llevar el estado a mano hay que quitar esa línea; desde entonces aw no lo sobrescribe.
 * **`core/` y `memory/`** se crean con un formato base para completar a mano (configuración, arranque, enrutamiento, política de memoria, memoria global). Los que solo remiten a otra fuente lo dicen en vez de duplicar contenido. `aw doctor` cuenta los campos `(completar)` que faltan.
 * **El índice de proyectos** del workspace (`memory/projects/project_index.md` y `memory/context_index.json`) lo regenera aw al sincronizar y al cerrar cada sesión: proyecto, estado y última actividad.
