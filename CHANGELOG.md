@@ -2,6 +2,15 @@
 
 Los cambios de cada versión, del más reciente al más antiguo. Las versiones siguen el formato mayor.menor.parche.
 
+## [Sin publicar]
+
+### Cambiado
+- El resumen de inicio de sesión y `state.md` ya no muestran las aperturas, cierres y compactaciones de sesión
+  (siguen en el registro), y el resumen no repite las líneas de «Última actividad» en «Registro reciente».
+- `aw task add`, `start` y `done` dejan una línea `[tarea]` en el registro de ejecución.
+- README: descripción, arranque rápido y ejemplo del resumen de inicio; se quitan «Flujo básico de Git» y
+  «Buenas prácticas». Nuevo `README.en.md`, un resumen en inglés.
+
 ## [2.0.0] — 2026-10-02
 
 Primera versión con etiqueta. La versión que estaba publicada antes en GitHub no tenía número; se considera la

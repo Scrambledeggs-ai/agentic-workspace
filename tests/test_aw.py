@@ -431,6 +431,20 @@ class TestTareas(AwCase):
         self.assertNotIn("Hechas", out)
         self.assertIn("Hechas:", self.aw("task", "list", "--all", cwd=project).stdout)
 
+    def test_los_movimientos_de_tareas_quedan_en_el_registro(self):
+        project = self.new_project()
+        self.aw("task", "add", "a", "--prio", "P1", cwd=project)
+        self.aw("task", "add", "b", cwd=project)
+        self.aw("task", "start", "T-001", cwd=project)
+        self.aw("task", "done", "T-001", cwd=project)
+        self.aw("task", "done", "T-002", cwd=project)
+        tareas = [line.split("] ", 1)[1] for line in self.read(project, "execution", "run_log.md").splitlines()
+                  if "[tarea]" in line]
+        self.assertEqual(tareas, ["T-001 creada [P1]: a", "T-002 creada [P2]: b", "T-001 iniciada: a",
+                                  "T-001 hecha: a", "T-002 hecha: b"])
+        self.aw("task", "start", "T-001", cwd=project)  # un error no deja rastro en el registro
+        self.assertEqual(self.read(project, "execution", "run_log.md").count("[tarea]"), 5)
+
     def test_state_refleja_las_tareas(self):
         project = self.new_project()
         self.aw("task", "add", "a", "--prio", "P1", cwd=project)
@@ -568,10 +582,32 @@ class TestHooks(AwCase):
         context = output["additionalContext"]
         self.assertIn("Proyecto demo", context)
         self.assertIn("T-001 [P1] tarea activa", context)
-        self.assertIn("iniciada (startup)", context)
+        self.assertIn("[tarea] T-001 iniciada: tarea activa", context)
+        self.assertNotIn("iniciada (startup)", context)  # la apertura se registra, pero no ocupa el resumen
         self.assertNotIn("aw:auto", context)
         self.assertLessEqual(len(context.splitlines()), 45)
         self.assertIn("[sesión] iniciada (startup)", self.read(project, "execution", "run_log.md"))
+
+    def test_session_start_no_se_llena_de_sesiones_ni_repite_lineas(self):
+        project = self.new_project()
+        self.aw("task", "add", "tarea real", cwd=project)
+        self.aw("log", "nota importante", cwd=project)
+        for i in range(8):
+            self.hook("session-start", self.payload(project, session_id=f"s{i}", source="startup"), project)
+            self.hook("pre-compact", self.payload(project, session_id=f"s{i}", trigger="auto"), project)
+            self.hook("session-end", self.payload(project, session_id=f"s{i}", reason="other"), project)
+        context = json.loads(self.hook("session-start", self.payload(project, session_id="s9"), project).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("[sesión]", context)
+        self.assertNotIn("[compactación]", context)
+        self.assertIn("[tarea] T-001 creada [P2]: tarea real", context)
+        self.assertIn("[nota] nota importante", context)
+        entries = [line for line in context.splitlines() if line.startswith("- 20")]
+        self.assertEqual(len(entries), len(set(entries)), "una línea del registro aparece dos veces")
+        state = self.read(project, "state.md")
+        self.assertNotIn("[sesión]", state)
+        self.assertIn("[nota] nota importante", state)
+        self.assertIn("[sesión] terminada", self.read(project, "execution", "run_log.md"))  # el registro las conserva
 
     def test_session_start_limita_el_tamano(self):
         project = self.new_project()

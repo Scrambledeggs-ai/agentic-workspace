@@ -791,6 +791,7 @@ def task_add(project, title, prio="P2"):
         task_id = next_task_id(project)
         line = f"- [ ] {task_id} [{prio}] {title} (creada {today()})"
         write_text(path, insert_task_line(read_text(path), line, prio))
+        log_event(project, "tarea", f"{task_id} creada [{prio}]: {title}")
         refresh_state(project)
     return task_id, prio
 
@@ -808,6 +809,7 @@ def task_start(project, task_id):
             if task is None:
                 raise AwError(f"{task_id} ya está en curso.")
             write_text(backlog_path, new_backlog)  # copia que dejó un corte anterior
+            log_event(project, "tarea", f"{task_id} iniciada: {clean_title(task['title'])}")
             refresh_state(project)
             return task
         if task is None:
@@ -817,6 +819,7 @@ def task_start(project, task_id):
         line = f"- [ ] {task_id} [{task['prio']}] {task['title']} (iniciada {today()})"
         write_text(active_path, insert_task_line(read_text(active_path), line, task["prio"]))
         write_text(backlog_path, new_backlog)
+        log_event(project, "tarea", f"{task_id} iniciada: {clean_title(task['title'])}")
         refresh_state(project)
         return task
 
@@ -839,6 +842,7 @@ def task_done(project, task_id):
             append_text(pj(project, "tasks", "done.md"), f"- [x] {task_id} [{task['prio']}] {task['title']} (hecha {today()})\n")
         for path, text in remaining.items():
             write_text(path, text)
+        log_event(project, "tarea", f"{task_id} hecha: {clean_title(task['title'])}")
         refresh_state(project)
         return task
 
@@ -876,11 +880,20 @@ def log_entries(project):
     return [line for line in read_text(pj(project, "execution", "run_log.md")).splitlines() if line.startswith("- ")]
 
 
+# Las aperturas, cierres y compactaciones de sesión quedan en el registro, pero no se muestran en el estado ni en el
+# resumen de inicio: con el uso desplazaban a las tareas, decisiones, commits y notas.
+ROUTINE_LOG_RE = re.compile(r"- \d{4}-\d{2}-\d{2} \d{2}:\d{2} \[(sesión|compactación)\]")
+
+
+def activity_entries(project):
+    return [line for line in log_entries(project) if not ROUTINE_LOG_RE.match(line)]
+
+
 def build_state(project):
     active = load_tasks(project, "active.md")
     backlog = load_tasks(project, "backlog.md")
     done = load_tasks(project, "done.md")
-    entries = log_entries(project)
+    entries = activity_entries(project)
     decisions = decision_titles(project)
     lines = [
         f"Estado: {len(active)} en curso · {len(backlog)} pendientes · {len(done)} hechas · actualizado {today()}",
@@ -1088,7 +1101,8 @@ def build_digest(project, max_lines=45, max_chars=4000):
     state_lines = [line for line in read_text(pj(project, "state.md")).splitlines() if line.strip() != MARK_AUTO]
     lines = [f"[aw] Proyecto {os.path.basename(project)}: contexto cargado al iniciar la sesión (protocolo en el CLAUDE.md del workspace)."]
     lines += state_lines
-    recent = log_entries(project)[-10:]
+    shown = set(state_lines)  # lo que ya trae «Última actividad» no se repite
+    recent = [line for line in activity_entries(project) if line not in shown][-10:]
     if recent:
         lines += ["", "## Registro reciente"] + recent
     text = "\n".join(lines[:max_lines])
