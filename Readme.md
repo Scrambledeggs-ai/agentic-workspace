@@ -101,6 +101,7 @@ agentic-workspace/
 ├── tests/            pruebas (solo biblioteca estándar)
 ├── .github/          integración continua (pruebas en cada push)
 ├── CHANGELOG.md      cambios de cada versión
+├── GUIA.md           apéndice del manual: guía de uso de un proyecto
 ├── CONTRIBUTING.md   cómo proponer cambios
 ├── CODE_OF_CONDUCT.md
 ├── SECURITY.md       cómo informar de una vulnerabilidad
@@ -291,6 +292,8 @@ Cada prueba usa un workspace temporal (`AW_HOME`), así que no toca el workspace
 ## Documentación
 
 Manual de uso: [Manual de Agentic Workspace 2.0](https://claude.ai/artifact/NJJk1s6GcNVvkWsw6UKtrb). Incluye la migración de proyectos existentes, cómo deshacerla y cómo actualizar aw.
+
+Apéndice: [Guía de uso de un proyecto](GUIA.md). Qué completar al crear un proyecto y qué hacer mientras se trabaja en él, con ejemplos para cada campo.
 
 ---
 

@@ -4,7 +4,19 @@ Los cambios de cada versión, del más reciente al más antiguo. Las versiones s
 
 ## [Sin publicar]
 
+### Agregado
+- `aw report [proyecto] [--todos]`: reporte del proyecto en una página HTML (`artifacts/reporte-AAAA-MM-DD.html`)
+  con identidad, tareas, decisiones, actividad de los últimos 30 días, herramientas, entregables, asignaciones y
+  lo que falta completar. Sin nombre usa el proyecto de la carpeta actual; fuera de un proyecto exige un nombre o
+  `--todos`.
+- Hook `UserPromptSubmit` (`aw hook prompt`): el aviso de Stop sobre commits sin registrar llega también al
+  modelo, con el siguiente mensaje y una sola vez. Ejecuta `aw sync` para agregarlo a tus proyectos.
+- `GUIA.md`, apéndice del manual: qué completar en un proyecto nuevo y qué hacer durante el desarrollo, con
+  ejemplos por campo.
+
 ### Cambiado
+- Los commits se buscan también al terminar cada turno y al cerrar la sesión, no solo después de un comando con
+  `git`: cuentan los hechos desde otra terminal o con un alias.
 - El resumen de inicio de sesión y `state.md` ya no muestran las aperturas, cierres y compactaciones de sesión
   (siguen en el registro), y el resumen no repite las líneas de «Última actividad» en «Registro reciente».
 - `aw task add`, `start` y `done` dejan una línea `[tarea]` en el registro de ejecución.
