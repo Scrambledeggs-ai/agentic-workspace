@@ -101,6 +101,7 @@ agentic-workspace/
 ├── tests/            pruebas (solo biblioteca estándar)
 ├── .github/          integración continua (pruebas en cada push)
 ├── CHANGELOG.md      cambios de cada versión
+├── GUIA.md           apéndice del manual: guía de uso de un proyecto
 ├── CONTRIBUTING.md   cómo proponer cambios
 ├── CODE_OF_CONDUCT.md
 ├── SECURITY.md       cómo informar de una vulnerabilidad
@@ -212,10 +213,11 @@ Los hooks se declaran en `.claude/settings.json` de cada proyecto, que se crea d
 | `aw decide "título" --why "motivo" [--alt "alternativas"]` | Registra una decisión; sin motivo no se registra |
 | `aw log "texto"` | Agrega una nota al registro de ejecución |
 | `aw state` | Regenera y muestra `state.md` |
-| `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla: solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes). Si un proyecto es un repo git y `sync` le añadió archivos de aw sin ignorar, lo avisa |
+| `aw sync [proyecto...] [--dry-run] [--workspace]` | Lleva a los proyectos lo nuevo de la plantilla. Sin nombres actúa sobre **todos** los proyectos, aunque se ejecute dentro de uno; con nombres, solo sobre esos. Solo crea lo que falta, respalda y agrega, nunca reemplaza. Actualiza el `CLAUDE.md` del workspace si nadie lo modificó; con `--workspace` lo actualiza aunque tenga cambios propios (respaldando antes). Si un proyecto es un repo git y `sync` le añadió archivos de aw sin ignorar, lo avisa |
 | `aw unsync NOMBRE [--dry-run] [--yes]` | Deshace la sincronización de un proyecto migrado: borra los archivos que creó aw, solo si siguen sin cambios. Si alguno tiene cambios, avisa y no borra nada. Nunca toca lo que existía antes |
 | `aw update [--dry-run]` | Actualiza aw desde el repositorio del que se clonó (solo como avance directo, sin mezclar) y sincroniza los proyectos con la versión nueva |
 | `aw doctor [proyecto...]` | Diagnóstico: estructura, archivos vacíos, hooks, permisos, referencias a agentes, skills y herramientas, y, si el proyecto está en un repo git, qué archivos de aw no están ignorados (un `git add .` los incluiría) o ya están versionados, con las líneas para ignorarlos solo en local (`.git/info/exclude`) |
+| `aw report [proyecto] [--todos]` | Genera un reporte del proyecto en una página HTML: identidad, tareas, decisiones, actividad, commits, sesiones y errores de los últimos 30 días, herramientas más usadas, entregables, agentes y skills asignados, y lo que falta completar según `aw doctor`. Se guarda en `artifacts/reporte-AAAA-MM-DD.html` (el del mismo día se reemplaza). Sin nombre usa el proyecto de la carpeta actual; fuera de un proyecto hay que indicar cuál, y `--todos` genera uno por proyecto |
 
 ### Migrar un proyecto que ya existe
 
@@ -290,6 +292,8 @@ Cada prueba usa un workspace temporal (`AW_HOME`), así que no toca el workspace
 ## Documentación
 
 Manual de uso: [Manual de Agentic Workspace 2.0](https://claude.ai/artifact/NJJk1s6GcNVvkWsw6UKtrb). Incluye la migración de proyectos existentes, cómo deshacerla y cómo actualizar aw.
+
+Apéndice: [Guía de uso de un proyecto](GUIA.md). Qué completar al crear un proyecto y qué hacer mientras se trabaja en él, con ejemplos para cada campo.
 
 ---
 
