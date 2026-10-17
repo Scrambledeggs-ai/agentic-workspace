@@ -20,7 +20,7 @@ import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "generate.py")
-HOOK_EVENTS = ["SessionStart", "PostToolUse", "PostToolUseFailure", "PreCompact", "Stop", "SessionEnd"]
+HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "PreCompact", "Stop", "SessionEnd"]
 
 
 def slurp(path):
@@ -829,6 +829,70 @@ class TestHooks(AwCase):
         self.git(project, "commit", "-q", "-m", "c1")
         self.hook("post-tool", self.payload(project, tool_name="Bash", tool_input={"command": "git commit -m c1"}), project)
 
+    def test_el_aviso_de_stop_llega_al_modelo_con_el_siguiente_mensaje(self):
+        project = self.new_project()
+        self.commit_in_session(project)
+        self.assertEqual(self.hook("prompt", self.payload(project), project).stdout, "")
+        self.hook("stop", self.payload(project), project)
+        context = json.loads(self.hook("prompt", self.payload(project), project).stdout)["hookSpecificOutput"]
+        self.assertEqual(context["hookEventName"], "UserPromptSubmit")
+        self.assertIn("1 commit(s)", context["additionalContext"])
+        self.assertIn("aw decide", context["additionalContext"])
+        self.assertEqual(self.hook("prompt", self.payload(project), project).stdout, "")  # una sola vez
+        self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
+
+    def test_el_aviso_no_llega_al_modelo_si_entre_medio_se_registro_algo(self):
+        project = self.new_project()
+        self.commit_in_session(project)
+        self.hook("stop", self.payload(project), project)
+        self.aw("decide", "Algo", "--why", "porque", cwd=project)
+        self.assertEqual(self.hook("prompt", self.payload(project), project).stdout, "")
+
+    def test_prompt_sin_sesion_es_silencioso(self):
+        project = self.new_project()
+        result = self.hook("prompt", self.payload(project), project)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+        self.assertEqual(os.listdir(self.sessions), [])
+
+    def test_stop_registra_commits_hechos_fuera_de_un_comando_con_git(self):
+        # Un commit desde otra terminal, o con un alias sin la palabra git, no pasa por PostToolUse.
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.hook("session-start", self.payload(project), project)
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "desde otra terminal")
+        self.bash(project, "g ci")
+        self.assertEqual(self.commit_entries(project), [])
+        message = json.loads(self.hook("stop", self.payload(project), project).stdout)["systemMessage"]
+        self.assertIn("1 commit(s)", message)
+        self.assertEqual(len(self.commit_entries(project)), 1)
+        self.assertIn("desde otra terminal", self.commit_entries(project)[0])
+        self.hook("stop", self.payload(project), project)
+        self.bash(project, "git log")
+        self.assertEqual(len(self.commit_entries(project)), 1)  # no se repite
+
+    def test_session_end_registra_commits_que_nadie_vio(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.hook("session-start", self.payload(project), project)
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "al final")
+        self.hook("session-end", self.payload(project), project)
+        log = self.read(project, "execution", "run_log.md")
+        self.assertIn("al final", log)
+        self.assertIn("terminada: 1 commit(s)", log)
+        self.assertEqual(os.listdir(self.sessions), [])
+
+    def test_stop_y_session_end_sin_sesion_no_miran_el_repositorio(self):
+        project = self.new_project()
+        self.git(project, "init", "-q")
+        self.git(project, "add", ".")
+        self.git(project, "commit", "-q", "-m", "sin sesion")
+        self.assertEqual(self.hook("stop", self.payload(project), project).stdout, "")
+        self.assertEqual(os.listdir(self.sessions), [])
+        self.hook("session-end", self.payload(project), project)
+        self.assertEqual(self.commit_entries(project), [])
+
     def test_session_start_al_reanudar_no_repite_el_aviso(self):
         project = self.new_project()
         self.commit_in_session(project)
@@ -850,7 +914,9 @@ class TestHooks(AwCase):
         self.git(project, "add", ".")
         self.git(project, "commit", "-q", "-m", "c1")
         self.hook("post-tool", {"cwd": project, "tool_name": "Bash", "tool_input": {"command": "git commit -m c1"}}, project)
-        # Esa sesión termina sin SessionEnd; llega una nueva, también sin session_id.
+        # Esa sesión termina sin SessionEnd; llega una nueva, también sin session_id. Stop vuelve a leer el reflog
+        # desde el inicio de la sesión, que se mide en segundos: la nueva empieza en el segundo siguiente al commit.
+        time.sleep(1.1)
         self.hook("session-start", {"cwd": project, "source": "startup"}, project)
         self.assertEqual(self.hook("stop", {"cwd": project}, project).stdout, "")
 

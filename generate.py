@@ -96,7 +96,7 @@ DATE_SUFFIX_RE = re.compile(r"(\s*\((?:creada|iniciada|hecha) \d{4}-\d{2}-\d{2}\
 COMMIT_REFLOG_RE = re.compile(r"(?:commit|merge|cherry-pick|revert)\b(?!.*\bFast-forward\b)")
 
 
-HOOK_EVENTS = ("session-start", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
+HOOK_EVENTS = ("session-start", "prompt", "post-tool", "tool-failure", "pre-compact", "stop", "session-end")
 
 TEXT_EXT = (".md", ".json")  # los únicos archivos que aw interpreta; lo demás no lo lee
 
@@ -1151,15 +1151,10 @@ def new_commits(cwd, since, seen):
     return found[::-1]
 
 
-def hook_post_tool(payload, project):
-    tool = str(payload.get("tool_name") or "?")
-    key = session_key(payload, project)
+def record_commits(payload, project, key, session):
+    # Anota en el registro los commits nuevos del reflog y los cuenta en los eventos de la sesión. Lo usan PostToolUse
+    # (tras un comando con git), Stop y SessionEnd: así también cuentan los commits hechos desde otra terminal.
     events = session_path(key, "events")
-    session_append(events, f"T {tool}\n")
-    command = str((payload.get("tool_input") or {}).get("command") or "") if tool == "Bash" else ""
-    if not re.search(r"\bgit\b", command):
-        return  # sin git en el comando no se consulta el repositorio: el hook corre tras cada herramienta
-    session = load_session(key)
     since = session.get("inicio_ts")
     started = isinstance(since, int)
     if not started:
@@ -1177,6 +1172,16 @@ def hook_post_tool(payload, project):
         seen.append(commit_key)
     session["commits_vistos"] = seen[-200:]
     session_write(session_path(key, "json"), json.dumps(session))
+
+
+def hook_post_tool(payload, project):
+    tool = str(payload.get("tool_name") or "?")
+    key = session_key(payload, project)
+    session_append(session_path(key, "events"), f"T {tool}\n")
+    command = str((payload.get("tool_input") or {}).get("command") or "") if tool == "Bash" else ""
+    if not re.search(r"\bgit\b", command):
+        return  # sin git en el comando no se consulta el repositorio: el hook corre tras cada herramienta
+    record_commits(payload, project, key, load_session(key))
 
 
 def hook_tool_failure(payload, project):
@@ -1200,18 +1205,35 @@ def hook_pre_compact(payload, project):
 
 
 def hook_stop(payload, project):
-    refresh_state(project)
     session_id = session_key(payload, project)
     session = load_session(session_id)
+    if session:
+        record_commits(payload, project, session_id, session)
+    refresh_state(project)
     if not session or session.get("reminded"):
         return
     commits = sum(1 for line in session_events(session_id) if line == "C")
     if commits and watched_hashes(project) == session.get("hashes"):
-        session["reminded"] = True
-        session_write(session_path(session_id, "json"), json.dumps(session))
         message = (f"aw: hubo {commits} commit(s) en esta sesión y no se registró ninguna decisión ni movimiento de tareas. "
                    "Si corresponde, usa `aw decide` o `aw task`.")
+        # systemMessage solo lo ve la persona; al modelo le llega con el siguiente mensaje (hook_prompt).
+        session["reminded"] = True
+        session["aviso_pendiente"] = message
+        session_write(session_path(session_id, "json"), json.dumps(session))
         print(json.dumps({"systemMessage": message}, ensure_ascii=False))
+
+
+def hook_prompt(payload, project):
+    key = session_key(payload, project)
+    session = load_session(key)
+    message = session.pop("aviso_pendiente", None)
+    if not message:
+        return
+    session_write(session_path(key, "json"), json.dumps(session))
+    if watched_hashes(project) != session.get("hashes"):
+        return  # entre el aviso y este mensaje se registró una decisión o se movió una tarea
+    output = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": str(message)}}
+    print(json.dumps(output, ensure_ascii=False))
 
 
 def append_month_log(project, text):
@@ -1265,6 +1287,9 @@ def run_end_step(name, step, *args):
 def hook_session_end(payload, project):
     key = session_key(payload, project)
     try:
+        session = load_session(key)
+        if session:
+            run_end_step("commits", record_commits, payload, project, key, session)
         events = session_events(key)
         commits = sum(1 for line in events if line == "C")
         tools = {}
@@ -1288,6 +1313,7 @@ def hook_session_end(payload, project):
 
 HOOK_HANDLERS = {
     "session-start": hook_session_start,
+    "prompt": hook_prompt,
     "post-tool": hook_post_tool,
     "tool-failure": hook_tool_failure,
     "pre-compact": hook_pre_compact,
